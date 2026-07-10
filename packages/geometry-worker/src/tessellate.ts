@@ -1,10 +1,11 @@
 import type { OpenCascadeInstance, TopoDsShape } from "./occt-types";
+import { collectUniqueEdges } from "./regen";
 
 /**
- * A flat (non-indexed) triangle-soup mesh: each triangle owns its own 3 vertices
- * so per-triangle flat shading normals are exact. Spec §4.3's richer tessellation
- * (shared vertices, edge polylines, stable face/edge-ID maps for picking) lands
- * in Milestone 1/2; M0 only needs "does a real OCCT shape render correctly".
+ * A flat (non-indexed) triangle-soup mesh: each triangle owns its own 3
+ * vertices so per-triangle flat shading normals are exact. `faceIds` maps each
+ * triangle to the index of its source face (TopExp face enumeration order),
+ * which is what viewport face-picking resolves against.
  */
 export interface TessellatedMesh {
   positions: Float32Array;
@@ -12,13 +13,40 @@ export interface TessellatedMesh {
   /** One entry per triangle: index of the source face within the shape. */
   faceIds: Uint32Array;
   triangleCount: number;
+  /** Flattened xyz polyline points for all unique edges. */
+  edgePositions: Float32Array;
+  /** Per-edge ranges into edgePositions: [edgeIndex, startPoint, pointCount]. */
+  edgeRanges: Uint32Array;
 }
 
-const LINEAR_DEFLECTION = 0.1;
-const ANGULAR_DEFLECTION = 0.5;
+export interface TessellationQuality {
+  linearDeflection: number;
+  angularDeflection: number;
+}
 
-export function tessellateShape(oc: OpenCascadeInstance, shape: TopoDsShape): TessellatedMesh {
-  new oc.BRepMesh_IncrementalMesh_2(shape, LINEAR_DEFLECTION, false, ANGULAR_DEFLECTION, false);
+export const DISPLAY_QUALITY: TessellationQuality = {
+  linearDeflection: 0.1,
+  angularDeflection: 0.5,
+};
+
+/** Export quality per spec §7.13.1 "Standard". */
+export const EXPORT_QUALITY: TessellationQuality = {
+  linearDeflection: 0.05,
+  angularDeflection: 0.5,
+};
+
+export function tessellateShape(
+  oc: OpenCascadeInstance,
+  shape: TopoDsShape,
+  quality: TessellationQuality = DISPLAY_QUALITY,
+): TessellatedMesh {
+  new oc.BRepMesh_IncrementalMesh_2(
+    shape,
+    quality.linearDeflection,
+    false,
+    quality.angularDeflection,
+    false,
+  );
 
   const positions: number[] = [];
   const normals: number[] = [];
@@ -93,10 +121,36 @@ export function tessellateShape(oc: OpenCascadeInstance, shape: TopoDsShape): Te
     explorer.Next();
   }
 
+  // Edge polylines for display + picking (unique edges, discretized).
+  const edgePositions: number[] = [];
+  const edgeRanges: number[] = [];
+  const edges = collectUniqueEdges(oc, shape);
+  for (let e = 0; e < edges.length; e++) {
+    const curve = new oc.BRepAdaptor_Curve_2(edges[e]!);
+    const start = edgePositions.length / 3;
+    try {
+      const disc = new oc.GCPnts_TangentialDeflection_2(curve, 0.2, 0.05, 2, 1e-9, 1e-7);
+      const n = disc.NbPoints();
+      for (let i = 1; i <= n; i++) {
+        const p = disc.Value(i);
+        edgePositions.push(p.X(), p.Y(), p.Z());
+      }
+      edgeRanges.push(e, start, n);
+    } catch {
+      // Fall back to endpoints only.
+      const p1 = curve.Value(curve.FirstParameter());
+      const p2 = curve.Value(curve.LastParameter());
+      edgePositions.push(p1.X(), p1.Y(), p1.Z(), p2.X(), p2.Y(), p2.Z());
+      edgeRanges.push(e, start, 2);
+    }
+  }
+
   return {
     positions: Float32Array.from(positions),
     normals: Float32Array.from(normals),
     faceIds: Uint32Array.from(faceIds),
     triangleCount: faceIds.length,
+    edgePositions: Float32Array.from(edgePositions),
+    edgeRanges: Uint32Array.from(edgeRanges),
   };
 }

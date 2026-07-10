@@ -7,9 +7,22 @@ Full product & engineering spec: [`docs/SPEC.md`](docs/SPEC.md).
 
 ## Status
 
-Milestone 0 (foundation) complete: monorepo scaffold, and a real OpenCascade.js (OCCT)
-WASM kernel running in a Web Worker, tessellating a solid and rendering it in a Three.js
-viewport. See `docs/design/D1-worker-rpc-protocol.md` for the worker RPC design.
+**Working parametric modeler (v1 core loop).** The GP-1 golden path from the spec runs
+end to end in the browser: sketch a rectangle → dimension it with expressions → extrude
+→ sketch circles on a face → cut holes → fillet edges → export a validated, watertight
+binary STL (plus STEP, and exact-scale SVG/DXF from sketches). Includes: feature
+timeline with edit/delete and per-feature error reporting, named parameters with an
+expression engine (units, fractions like `3/8in`, functions), unlimited undo/redo,
+IndexedDB autosave that survives reload, and `.craftbit` file save/open.
+
+Known deltas from the full spec (deliberate, tracked):
+- Sketching is profile-based (rect/circle/polygon with expression dimensions), not yet
+  the PlaneGCS constraint solver of spec §7.6 (design gate D3).
+- Feature references use body+index addressing, not stable topological naming (D2).
+- Assembly (§7.10), import (§7.12), and the remaining modeling features of §7.7 are
+  not yet implemented.
+- Kernel is the prebuilt OCCT 7.4 full build (~14 MB gzipped), not the custom minimal
+  build of §4.2.
 
 ## Development
 

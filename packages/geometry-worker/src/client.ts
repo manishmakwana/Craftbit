@@ -2,7 +2,9 @@ import * as Comlink from "comlink";
 import type { GeometryWorkerApi } from "./worker";
 
 export type { TessellatedMesh } from "./tessellate";
-export type { GeometryWorkerApi } from "./worker";
+export type { BodyResult, GeometryWorkerApi, RegenResult, StlExportResult } from "./worker";
+export type { EvaluatedSketch, EvaluatedProfile, FeatureStatus, ResolvedPlane } from "./regen";
+export type { StlValidation } from "./exporters";
 
 export interface GeometryWorkerClient {
   api: Comlink.Remote<GeometryWorkerApi>;

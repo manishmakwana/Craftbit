@@ -10,7 +10,8 @@
   },
   "dependencies": {
     "comlink": "4.4.2",
-    "opencascade.js": "1.1.1"
+    "opencascade.js": "1.1.1",
+    "@craftbit/core": "workspace:*"
   },
   "devDependencies": {
     "typescript": "^5.7.2"
