@@ -1,0 +1,13 @@
+{
+  "name": "Craftbit",
+  "image": "mcr.microsoft.com/devcontainers/typescript-node:1-22-bookworm",
+  "postCreateCommand": "corepack enable && corepack prepare pnpm@10.33.0 --activate && pnpm install",
+  "postStartCommand": "bash .devcontainer/start-dev.sh",
+  "forwardPorts": [5173],
+  "portsAttributes": {
+    "5173": {
+      "label": "Craftbit dev server",
+      "onAutoForward": "openPreview"
+    }
+  }
+}
