@@ -1,0 +1,49 @@
+/*
+ * M0 placeholder styles only. The token-based design system from spec §7.0
+ * (color scale, typography, spacing, motion) is Milestone 1 scope.
+ */
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  margin: 0;
+  padding: 0;
+  width: 100%;
+  height: 100%;
+  background: #1a1b1e;
+  color: #e4e4e7;
+  font-family:
+    Inter,
+    system-ui,
+    -apple-system,
+    sans-serif;
+  overflow: hidden;
+}
+
+.viewport-root {
+  position: relative;
+  width: 100%;
+  height: 100%;
+}
+
+.viewport-canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+.loading-overlay {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 14px;
+  color: #a1a1aa;
+  background: #1a1b1e;
+  pointer-events: none;
+}
