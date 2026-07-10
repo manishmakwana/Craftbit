@@ -26,6 +26,7 @@
 5. [Technology Stack](#5-technology-stack)
 6. [Document & Data Model](#6-document--data-model)
 7. [Feature Specifications](#7-feature-specifications)
+   - 7.0 [UI Design Language & UX Principles](#70-ui-design-language--ux-principles)
    - 7.1 [Application Shell & Layout](#71-application-shell--layout)
    - 7.2 [Project Management (Local-First Storage)](#72-project-management-local-first-storage)
    - 7.3 [Units & Preferences](#73-units--preferences)
@@ -106,6 +107,11 @@ These are deliberately excluded to keep v1 shippable. See [Section 13](#13-post-
    reasonable, so tutorials and muscle memory transfer.
 5. **Every document is a plain file.** The `.craftbit` format is documented JSON-in-zip;
    users own their data completely.
+6. **Modern and intuitive for everyone.** The UI must feel like a polished, contemporary
+   web product — not a port of desktop CAD chrome. A first-time user must be able to
+   discover the core workflow without a manual, while an experienced CAD user must never
+   feel slowed down: every discoverable path (menus, tooltips, tutorial) has a fast path
+   (shortcut, command palette, direct manipulation). See §7.0 for the binding design rules.
 
 ---
 
@@ -445,6 +451,127 @@ type SketchConstraint =
 
 Each subsection: **Purpose → Behavior → UI → Acceptance criteria (AC)**.
 ACs are written to be directly convertible into automated tests.
+
+---
+
+### 7.0 UI Design Language & UX Principles
+
+**Purpose:** Binding rules for how every screen, panel, and interaction in Craftbit is
+designed. The goal (Product Principle 6): the app must feel **modern and intuitive to a
+first-time user** and **fast and unobtrusive to an experienced CAD user** — at the same
+time. These rules apply to every feature in §7.1–§7.16; a feature is not "done" until it
+complies. AI agents implementing UI must follow this section over their own defaults.
+
+#### 7.0.1 UX principles (in priority order)
+
+1. **The model is the hero.** The viewport gets maximum screen area; chrome is minimal,
+   flat, and quiet. No skeuomorphic desktop-CAD ribbons, no dense bevelled toolbars.
+   Panels overlay or dock with generous whitespace and collapse to nothing.
+2. **Progressive disclosure.** Every dialog shows the 2–3 fields a beginner needs first;
+   advanced options (e.g., extrude "to face", tessellation tuning) live behind an
+   expandable "More options" row that remembers its open/closed state per feature type.
+   Defaults must be smart enough that OK-without-touching-anything does something sensible.
+3. **Two speeds, one UI.** Every action reachable by browsing (toolbar → labeled button
+   with tooltip) is also reachable fast (single-key shortcut and command palette `S`).
+   Tooltips always show the shortcut. The UI never *requires* memorization, and never
+   *punishes* it — no modal sequences a shortcut can't skip.
+4. **Direct manipulation over forms.** Wherever geometry can be edited by dragging
+   (sketch entities, extrude height via an on-screen arrow manipulator, section plane,
+   joint DOFs), it must be — with the numeric field as the precise alternative, both
+   live-synced. Manipulator handles: ≥ 24 px hit targets (44 px touch).
+5. **Immediate, honest feedback.** Every user action produces a visible response within
+   100 ms — a preview, a highlight, a spinner on the affected control (never a
+   full-screen blocker), or an error. Long kernel operations show progress in place and
+   remain cancellable. The UI never dead-ends: every error names the problem in plain
+   language and offers the next step ("Fillet radius too large — try ≤ 2.4 mm" with an
+   "Apply max" button, per §7.7.3's error map).
+6. **Forgiveness.** Everything is undoable (§7.14), destructive actions confirm with the
+   consequence spelled out ("Deletes Sketch2 and 3 dependent features"), and dangerous
+   options (e.g., "export anyway" past a failed manifold check) are visually demoted,
+   never default.
+7. **Learn by doing, not by reading.** Empty states, ghost hints, and the interactive
+   tutorial (§7.16) teach in context. No feature may rely on external docs for its
+   primary path.
+
+#### 7.0.2 Visual design system
+
+Implemented as design tokens (CSS custom properties) in `packages/app/src/theme/tokens.css`
+— components consume tokens only; hard-coded colors/sizes fail lint (stylelint rule).
+
+- **Look:** clean, flat, high-contrast "modern web tool" aesthetic (reference class:
+  Figma / Linear / Onshape — not SolidWorks/FreeCAD). Rounded corners (radius tokens:
+  4 px controls, 8 px cards/dialogs), 1 px hairline borders, soft elevation shadows
+  (2 levels only: raised, overlay). No gradients on chrome, no glassmorphism.
+- **Color:** neutral gray scale for chrome (12-step scale token set), a single accent
+  color for interactive/selected states, plus a fixed semantic set: success (green),
+  warning (amber), danger (red), selection/highlight (accent + a distinct pre-selection
+  hover tint). Viewport-geometry colors (body default, edges, selected, hovered, sketch
+  constrained/unconstrained/construction/error) are their own token group and must be
+  legible over both themes' viewport backgrounds. All pairings meet WCAG AA (4.5:1 text,
+  3:1 UI glyphs); the token file includes a CI-checked contrast test.
+- **Themes:** dark (default) and light, switchable live (§7.3); both first-class — every
+  component is reviewed in both. Theme = token swap only; no per-component theme logic.
+- **Typography:** a single variable sans (Inter or system-ui stack) — UI at 13 px base
+  (desktop) / 15 px (touch), 4-size scale (11/13/15/20). Numerals in dimension fields
+  and readouts use `font-variant-numeric: tabular-nums` so values don't jitter as they
+  change.
+- **Spacing & density:** 4 px base grid; controls 28 px tall (desktop) / 40 px (touch);
+  panel padding 12 px. Compact but touch-scalable via a density token switched by
+  pointer type.
+- **Iconography:** single stroke-style set (Lucide + custom CAD glyphs drawn to the same
+  grid/stroke), 16/20 px sizes, always paired with a tooltip (name + shortcut). Toolbar
+  icons for modeling features must depict the *result* (e.g., a filleted corner), not
+  abstract symbols.
+- **Motion:** purposeful and short — 150 ms (micro: hover, toggle) / 250 ms (panel
+  slide, dialog) / 300 ms (camera transitions, §7.4) with standard ease-out. No
+  bounces, no decorative animation. All motion respects `prefers-reduced-motion`
+  (instant swaps).
+
+#### 7.0.3 Interaction patterns (component contracts)
+
+A small component library in `packages/app/src/ui/` is built once in M1 and reused
+everywhere — no feature builds bespoke buttons/inputs/dialogs:
+
+- **Feature dialog** (right-docked card, §7.1): header (icon, name, close), body
+  (selection chip-lists + fields), "More options" expander, footer (Cancel / OK-primary).
+  Never covers the selection it asks for; draggable; Enter/Esc wired (§7.7 AC1).
+- **Selection chips:** each picked entity = a removable chip ("Face ×", hover =
+  highlight in viewport); active pick-slot pulses subtly to show *what to click next* —
+  this is the primary novice guidance mechanism inside dialogs.
+- **Dimension input:** the single shared expression field (unit parsing §7.3, `fx`
+  badge §7.9, scrub-to-adjust by dragging the label, up/down arrow increments).
+- **Toasts:** bottom-center, max 1 visible + queue, auto-dismiss 4 s, action button
+  allowed ("Undo", "Show"), never for errors that block work (those render in place).
+- **Command palette (`S`):** fuzzy search over every command with icons + shortcuts;
+  recently used first; also searches parameters and timeline features by name (jump-to).
+- **Contextual right-click menus** everywhere an entity can be acted on; first item =
+  the most likely action (matching Fusion muscle memory where sensible).
+- **Empty states:** every empty panel/region shows one line of ghost text + the one
+  action that fills it (e.g., timeline: "Features appear here — press S to sketch").
+- **Status bar** (bottom): left = contextual hint for the active tool ("Click to place
+  second corner · Esc to cancel"), right = DOF/units/selection count. This line is the
+  app's continuous, non-intrusive teacher.
+
+#### 7.0.4 Novice/expert calibration (measurable)
+
+- **Novice bar:** a first-time user completes GP-1 (bracket → STL) unaided in
+  < 10 minutes (hallway-tested per release checklist); tutorial completion rate in
+  testing ≥ 80%; every tool's first use is guided by the status-bar hint alone.
+- **Expert bar:** every GP workflow is executable 100% keyboard+mouse without opening a
+  menu (verified by a scripted Playwright "expert run" using only shortcuts/palette);
+  no confirmation dialog appears for non-destructive actions; repeated feature creation
+  (e.g., "last tool" repeat with Enter) supported in the sketcher.
+- **Accessibility floor (release-blocking):** full keyboard reachability, visible focus
+  rings, ARIA labels/roles on all controls, AA contrast, reduced-motion support.
+  (Screen-reader operation of the 3D viewport itself is best-effort v1.)
+
+**AC:**
+1. Token-only styling enforced by lint in CI; contrast test passes for both themes.
+2. Playwright "expert run" of GP-1 completes with zero menu opens.
+3. Every dialog in the app is instantiated from the shared feature-dialog component
+   (checked by a dep-cruiser/lint rule against raw `<dialog>`/modal usage).
+4. `prefers-reduced-motion` disables all animated transitions (visual regression test).
+5. Hallway test per §7.0.4 is a release-checklist gate.
 
 ---
 
@@ -1105,7 +1232,8 @@ dependency order.)
 - **M0 — Skeleton (foundation):** repo scaffolding, CI, Vite app shell, kernel WASM build
   loading in a worker with a "make a box, tessellate, render in Three.js" smoke test;
   perf harness skeleton. *Demo: a hardcoded box orbiting at 60 fps.*
-- **M1 — Viewport & document core:** §7.1 shell, §7.4 viewport, §7.5 selection,
+- **M1 — Viewport & document core:** design tokens + shared UI component library
+  (§7.0), §7.1 shell, §7.4 viewport, §7.5 selection,
   document model + commands + undo (§6, §7.14), storage/autosave (§7.2), units (§7.3).
   *Demo: create primitive boxes via a debug command, select faces, undo, refresh-restore.*
 - **M2 — Regeneration engine + topological naming (the risk milestone):** §4.3 in full,
