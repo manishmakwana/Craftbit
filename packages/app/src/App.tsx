@@ -10,6 +10,16 @@ import { ExtrudeDialog } from "./components/dialogs/ExtrudeDialog";
 import { FilletDialog } from "./components/dialogs/FilletDialog";
 import { ParametersDialog } from "./components/dialogs/ParametersDialog";
 import { ExportDialog } from "./components/dialogs/ExportDialog";
+import {
+  BooleanDialog,
+  ChamferDialog,
+  CircularPatternDialog,
+  LinearPatternDialog,
+  MirrorDialog,
+  MoveDialog,
+  RevolveDialog,
+  ShellDialog,
+} from "./components/dialogs/FeatureDialogs";
 import { useDocumentStore } from "./stores/documentStore";
 import { useGeometryStore } from "./stores/geometryStore";
 import { useUiStore } from "./stores/uiStore";
@@ -101,7 +111,17 @@ export function App() {
         <Viewport />
         {dialog?.kind === "planeChooser" && <PlaneChooserDialog />}
         {dialog?.kind === "extrude" && <ExtrudeDialog featureId={dialog.featureId} />}
+        {dialog?.kind === "revolve" && <RevolveDialog featureId={dialog.featureId} />}
         {dialog?.kind === "fillet" && <FilletDialog featureId={dialog.featureId} />}
+        {dialog?.kind === "chamfer" && <ChamferDialog featureId={dialog.featureId} />}
+        {dialog?.kind === "shell" && <ShellDialog featureId={dialog.featureId} />}
+        {dialog?.kind === "mirror" && <MirrorDialog featureId={dialog.featureId} />}
+        {dialog?.kind === "linearPattern" && <LinearPatternDialog featureId={dialog.featureId} />}
+        {dialog?.kind === "circularPattern" && (
+          <CircularPatternDialog featureId={dialog.featureId} />
+        )}
+        {dialog?.kind === "boolean" && <BooleanDialog featureId={dialog.featureId} />}
+        {dialog?.kind === "move" && <MoveDialog featureId={dialog.featureId} />}
         {dialog?.kind === "parameters" && <ParametersDialog />}
         {dialog?.kind === "export" && <ExportDialog />}
         {toast && (

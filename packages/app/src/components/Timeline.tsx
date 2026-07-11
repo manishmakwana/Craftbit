@@ -6,7 +6,16 @@ import type { Feature } from "@craftbit/core";
 const ICONS: Record<Feature["type"], string> = {
   sketch: "✏",
   extrude: "⬆",
+  revolve: "⟳",
   fillet: "◠",
+  chamfer: "◣",
+  shell: "▢",
+  mirror: "⇋",
+  linearPattern: "⠿",
+  circularPattern: "⊚",
+  boolean: "⊛",
+  move: "✥",
+  importStep: "⇪",
 };
 
 export function Timeline() {
@@ -20,10 +29,10 @@ export function Timeline() {
   const onEdit = (feature: Feature) => {
     if (feature.type === "sketch") {
       enterSketch(feature.id);
-    } else if (feature.type === "extrude") {
-      openDialog({ kind: "extrude", featureId: feature.id });
+    } else if (feature.type === "importStep") {
+      showToast("Imported files can be deleted and re-imported, not edited");
     } else {
-      openDialog({ kind: "fillet", featureId: feature.id });
+      openDialog({ kind: feature.type, featureId: feature.id });
     }
   };
 

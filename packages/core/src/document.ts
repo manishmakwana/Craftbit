@@ -86,6 +86,11 @@ export interface EdgeRef {
   edgeIndex: number;
 }
 
+export interface FaceRef {
+  bodyId: string;
+  faceIndex: number;
+}
+
 export interface FilletFeature {
   id: string;
   type: "fillet";
@@ -93,10 +98,138 @@ export interface FilletFeature {
   suppressed: boolean;
   edges: EdgeRef[];
   radius: Expr;
-  /** false = chamfer-style not supported yet; fillet only. */
 }
 
-export type Feature = SketchFeature | ExtrudeFeature | FilletFeature;
+export interface ChamferFeature {
+  id: string;
+  type: "chamfer";
+  name: string;
+  suppressed: boolean;
+  edges: EdgeRef[];
+  distance: Expr;
+}
+
+export interface RevolveFeature {
+  id: string;
+  type: "revolve";
+  name: string;
+  suppressed: boolean;
+  sketchId: string;
+  profileIds: string[];
+  /** Revolution axis: the sketch plane's local X or Y axis through its origin. */
+  axis: "x" | "y";
+  /** Angle in degrees (expression); 360 = full revolution. */
+  angle: Expr;
+  operation: ExtrudeOp;
+}
+
+export interface ShellFeature {
+  id: string;
+  type: "shell";
+  name: string;
+  suppressed: boolean;
+  /** Faces to remove (open sides); all must belong to the same body. */
+  faces: FaceRef[];
+  thickness: Expr;
+}
+
+export interface MirrorFeature {
+  id: string;
+  type: "mirror";
+  name: string;
+  suppressed: boolean;
+  bodyId: string;
+  /** Mirror plane through the origin. */
+  plane: OriginPlaneName;
+  /** true: fuse the mirrored copy into the source body; false: new body. */
+  merge: boolean;
+}
+
+export interface LinearPatternFeature {
+  id: string;
+  type: "linearPattern";
+  name: string;
+  suppressed: boolean;
+  bodyId: string;
+  direction: "x" | "y" | "z";
+  spacing: Expr;
+  count: Expr;
+}
+
+export interface CircularPatternFeature {
+  id: string;
+  type: "circularPattern";
+  name: string;
+  suppressed: boolean;
+  bodyId: string;
+  /** Rotation axis through the origin. */
+  axis: "x" | "y" | "z";
+  count: Expr;
+}
+
+export interface BooleanFeature {
+  id: string;
+  type: "boolean";
+  name: string;
+  suppressed: boolean;
+  targetBodyId: string;
+  toolBodyId: string;
+  op: "join" | "cut" | "intersect";
+}
+
+/** Assembly positioning: translate/rotate a body (spec §7.7.12 Move/Copy). */
+export interface MoveFeature {
+  id: string;
+  type: "move";
+  name: string;
+  suppressed: boolean;
+  bodyId: string;
+  tx: Expr;
+  ty: Expr;
+  tz: Expr;
+  rotAxis: "x" | "y" | "z";
+  /** Degrees (expression); rotation about the axis through the origin, applied before translation. */
+  rotAngle: Expr;
+}
+
+/** Imported STEP solid, file bytes embedded in the document (base64). */
+export interface ImportStepFeature {
+  id: string;
+  type: "importStep";
+  name: string;
+  suppressed: boolean;
+  fileName: string;
+  dataB64: string;
+}
+
+export type Feature =
+  | SketchFeature
+  | ExtrudeFeature
+  | RevolveFeature
+  | FilletFeature
+  | ChamferFeature
+  | ShellFeature
+  | MirrorFeature
+  | LinearPatternFeature
+  | CircularPatternFeature
+  | BooleanFeature
+  | MoveFeature
+  | ImportStepFeature;
+
+export const FEATURE_TYPES: readonly Feature["type"][] = [
+  "sketch",
+  "extrude",
+  "revolve",
+  "fillet",
+  "chamfer",
+  "shell",
+  "mirror",
+  "linearPattern",
+  "circularPattern",
+  "boolean",
+  "move",
+  "importStep",
+] as const;
 
 export interface Parameter {
   id: string;
@@ -145,7 +278,7 @@ export function validateDocument(doc: unknown): CraftbitDocument {
   }
   for (const f of d.features as { type?: string; id?: string }[]) {
     if (!f || typeof f.id !== "string") throw new Error("Feature missing id");
-    if (f.type !== "sketch" && f.type !== "extrude" && f.type !== "fillet") {
+    if (!FEATURE_TYPES.includes(f.type as Feature["type"])) {
       throw new Error(`Unknown feature type "${String(f.type)}"`);
     }
   }

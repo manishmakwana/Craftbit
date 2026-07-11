@@ -42,7 +42,9 @@ export interface GpPln {
 }
 
 export interface GpTrsf {
-  readonly __gpTrsfBrand: never;
+  SetTranslation_1(vec: GpVec): void;
+  SetRotation_1(axis: GpAx1, angleRad: number): void;
+  SetMirror_3(plane: GpAx2): void;
 }
 
 export interface TopLocLocation {
@@ -120,6 +122,18 @@ export interface BRepFilletApiMakeFillet {
   Shape(): TopoDsShape;
 }
 
+export interface BRepFilletApiMakeChamfer {
+  Add_2(distance: number, edge: TopoDsEdge): void;
+  Build(): void;
+  IsDone(): boolean;
+  Shape(): TopoDsShape;
+}
+
+export interface TopToolsListOfShape {
+  Append_1(shape: TopoDsShape): void;
+  Size(): number;
+}
+
 export interface BRepAdaptorCurve {
   FirstParameter(): number;
   LastParameter(): number;
@@ -183,12 +197,33 @@ export interface OpenCascadeInstance {
   BRepAlgoAPI_Fuse_3: new (a: TopoDsShape, b: TopoDsShape) => BRepAlgoApiBoolean;
   BRepAlgoAPI_Common_3: new (a: TopoDsShape, b: TopoDsShape) => BRepAlgoApiBoolean;
 
-  // Fillet
+  // Fillet & chamfer
   BRepFilletAPI_MakeFillet: new (
     shape: TopoDsShape,
     filletShape: { value: number },
   ) => BRepFilletApiMakeFillet;
   ChFi3d_FilletShape: { ChFi3d_Rational: { value: number } };
+  BRepFilletAPI_MakeChamfer: new (shape: TopoDsShape) => BRepFilletApiMakeChamfer;
+
+  // Shell (thick solid) — OCCT 7.4 all-args constructor form
+  TopTools_ListOfShape_1: new () => TopToolsListOfShape;
+  BRepOffsetAPI_MakeThickSolid_2: new (
+    shape: TopoDsShape,
+    closingFaces: TopToolsListOfShape,
+    offset: number,
+    tolerance: number,
+    mode: { value: number },
+    intersection: boolean,
+    selfInter: boolean,
+    join: { value: number },
+    removeIntEdges: boolean,
+  ) => { IsDone(): boolean; Shape(): TopoDsShape };
+  BRepOffset_Mode: { BRepOffset_Skin: { value: number } };
+  GeomAbs_JoinType: { GeomAbs_Arc: { value: number } };
+
+  // Transforms
+  gp_Trsf_1: new () => GpTrsf;
+  BRepBuilderAPI_Transform_2: new (shape: TopoDsShape, trsf: GpTrsf, copy: boolean) => ShapeMaker;
 
   // Meshing & measurement
   BRepMesh_IncrementalMesh_2: new (
@@ -259,6 +294,14 @@ export interface OpenCascadeInstance {
       compgraph: boolean,
     ): number | { value: number };
     Write(path: string): number | { value: number };
+  };
+
+  // STEP import
+  STEPControl_Reader_1: new () => {
+    ReadFile(path: string): number | { value: number };
+    TransferRoots(): number;
+    NbShapes(): number;
+    OneShape(): TopoDsShape;
   };
   STEPControl_StepModelType: { STEPControl_AsIs: { value: number } };
 

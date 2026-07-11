@@ -18,7 +18,15 @@ export interface EdgeSel {
 
 export type DialogState =
   | { kind: "extrude"; featureId?: string }
+  | { kind: "revolve"; featureId?: string }
   | { kind: "fillet"; featureId?: string }
+  | { kind: "chamfer"; featureId?: string }
+  | { kind: "shell"; featureId?: string }
+  | { kind: "mirror"; featureId?: string }
+  | { kind: "linearPattern"; featureId?: string }
+  | { kind: "circularPattern"; featureId?: string }
+  | { kind: "boolean"; featureId?: string }
+  | { kind: "move"; featureId?: string }
   | { kind: "parameters" }
   | { kind: "export" }
   | { kind: "planeChooser" }

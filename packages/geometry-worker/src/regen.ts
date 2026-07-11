@@ -18,11 +18,21 @@ import {
   ExprError,
   evaluateExpression,
   evaluateParameters,
+  type BooleanFeature,
+  type ChamferFeature,
+  type CircularPatternFeature,
   type CraftbitDocument,
+  type EdgeRef,
   type ExtrudeFeature,
   type Feature,
   type FilletFeature,
+  type ImportStepFeature,
+  type LinearPatternFeature,
+  type MirrorFeature,
+  type MoveFeature,
   type PlaneRef,
+  type RevolveFeature,
+  type ShellFeature,
   type SketchFeature,
   type SketchProfile,
 } from "@craftbit/core";
@@ -141,8 +151,35 @@ function executeFeature(
     case "extrude":
       executeExtrude(oc, feature, state, env);
       break;
+    case "revolve":
+      executeRevolve(oc, feature, state, env);
+      break;
     case "fillet":
       executeFillet(oc, feature, state, env);
+      break;
+    case "chamfer":
+      executeChamfer(oc, feature, state, env);
+      break;
+    case "shell":
+      executeShell(oc, feature, state, env);
+      break;
+    case "mirror":
+      executeMirror(oc, feature, state);
+      break;
+    case "linearPattern":
+      executeLinearPattern(oc, feature, state, env);
+      break;
+    case "circularPattern":
+      executeCircularPattern(oc, feature, state, env);
+      break;
+    case "boolean":
+      executeBoolean(oc, feature, state);
+      break;
+    case "move":
+      executeMove(oc, feature, state, env);
+      break;
+    case "importStep":
+      executeImportStep(oc, feature, state);
       break;
   }
 }
@@ -562,3 +599,329 @@ function executeFillet(
     body.volume = shapeVolume(oc, body.shape);
   }
 }
+
+// ---------------------------------------------------------------- revolve
+
+function applyToolOperation(
+  oc: OpenCascadeInstance,
+  featureId: string,
+  operation: ExtrudeFeature["operation"],
+  tool: TopoDsShape,
+  state: RegenState,
+): void {
+  switch (operation) {
+    case "new": {
+      state.bodies.push({ id: featureId, shape: tool, volume: shapeVolume(oc, tool) });
+      break;
+    }
+    case "join": {
+      const target = state.bodies.find((b) => intersects(oc, b.shape, tool));
+      if (!target) {
+        state.bodies.push({ id: featureId, shape: tool, volume: shapeVolume(oc, tool) });
+        break;
+      }
+      const fuse = new oc.BRepAlgoAPI_Fuse_3(target.shape, tool);
+      fuse.Build();
+      if (!fuse.IsDone()) throw new Error("Join failed");
+      target.shape = fuse.Shape();
+      target.volume = shapeVolume(oc, target.shape);
+      break;
+    }
+    case "cut": {
+      if (state.bodies.length === 0) throw new Error("Nothing to cut — no bodies yet");
+      let cutAny = false;
+      for (const body of state.bodies) {
+        if (!intersects(oc, body.shape, tool)) continue;
+        const cut = new oc.BRepAlgoAPI_Cut_3(body.shape, tool);
+        cut.Build();
+        if (!cut.IsDone()) throw new Error("Cut failed");
+        body.shape = cut.Shape();
+        body.volume = shapeVolume(oc, body.shape);
+        cutAny = true;
+      }
+      if (!cutAny) throw new Error("Cut tool does not intersect any body");
+      break;
+    }
+  }
+}
+
+function executeRevolve(
+  oc: OpenCascadeInstance,
+  feature: RevolveFeature,
+  state: RegenState,
+  env: (name: string) => number,
+): void {
+  const sketch = state.sketches.find((s) => s.featureId === feature.sketchId);
+  if (!sketch) throw new Error("Revolve references a missing or failed sketch");
+
+  const angleDeg = evaluateExpression(feature.angle, env);
+  if (angleDeg <= 0 || angleDeg > 360) throw new Error("Revolve angle must be in (0, 360]");
+
+  const faces = buildProfileFaces(oc, sketch, feature.profileIds);
+  const { origin, xdir, ydir } = sketch.plane;
+  const axisDir = feature.axis === "x" ? xdir : ydir;
+  const axis = new oc.gp_Ax1_2(
+    new oc.gp_Pnt_3(origin[0], origin[1], origin[2]),
+    new oc.gp_Dir_4(axisDir[0], axisDir[1], axisDir[2]),
+  );
+
+  const solids = faces.map((f) =>
+    new oc.BRepPrimAPI_MakeRevol_1(f, axis, (angleDeg * Math.PI) / 180, true).Shape(),
+  );
+  const tool = fuseAll(oc, solids);
+  applyToolOperation(oc, feature.id, feature.operation, tool, state);
+}
+
+// ---------------------------------------------------------------- chamfer
+
+function executeChamfer(
+  oc: OpenCascadeInstance,
+  feature: ChamferFeature,
+  state: RegenState,
+  env: (name: string) => number,
+): void {
+  const distance = evaluateExpression(feature.distance, env);
+  if (distance <= 0) throw new Error("Chamfer distance must be > 0");
+  if (feature.edges.length === 0) throw new Error("Chamfer has no edges selected");
+
+  const byBody = new Map<string, number[]>();
+  for (const ref of feature.edges) {
+    const list = byBody.get(ref.bodyId) ?? [];
+    list.push(ref.edgeIndex);
+    byBody.set(ref.bodyId, list);
+  }
+
+  for (const [bodyId, edgeIndices] of byBody) {
+    const body = state.bodies.find((b) => b.id === bodyId);
+    if (!body) throw new Error(`Chamfer references missing body ${bodyId}`);
+    const edges = collectUniqueEdges(oc, body.shape);
+    const chamfer = new oc.BRepFilletAPI_MakeChamfer(body.shape);
+    for (const index of edgeIndices) {
+      const edge = edges[index];
+      if (!edge) throw new Error(`Chamfer references missing edge #${index}`);
+      chamfer.Add_2(distance, edge);
+    }
+    chamfer.Build();
+    if (!chamfer.IsDone()) {
+      throw new Error(`Chamfer failed — distance ${distance} may exceed adjacent face size`);
+    }
+    body.shape = chamfer.Shape();
+    body.volume = shapeVolume(oc, body.shape);
+  }
+}
+
+// ---------------------------------------------------------------- shell
+
+function executeShell(
+  oc: OpenCascadeInstance,
+  feature: ShellFeature,
+  state: RegenState,
+  env: (name: string) => number,
+): void {
+  const thickness = evaluateExpression(feature.thickness, env);
+  if (thickness <= 0) throw new Error("Shell thickness must be > 0");
+  if (feature.faces.length === 0) throw new Error("Shell needs at least one face to remove");
+
+  const bodyId = feature.faces[0]!.bodyId;
+  if (!feature.faces.every((f) => f.bodyId === bodyId)) {
+    throw new Error("All shell faces must belong to the same body");
+  }
+  const body = state.bodies.find((b) => b.id === bodyId);
+  if (!body) throw new Error(`Shell references missing body ${bodyId}`);
+
+  const faces = collectFaces(oc, body.shape);
+  const closing = new oc.TopTools_ListOfShape_1();
+  for (const ref of feature.faces) {
+    const face = faces[ref.faceIndex];
+    if (!face) throw new Error(`Shell references missing face #${ref.faceIndex}`);
+    closing.Append_1(face);
+  }
+
+  const thick = new oc.BRepOffsetAPI_MakeThickSolid_2(
+    body.shape,
+    closing,
+    -thickness, // negative = walls grow inward from the outer surface
+    1e-6,
+    oc.BRepOffset_Mode.BRepOffset_Skin,
+    false,
+    false,
+    oc.GeomAbs_JoinType.GeomAbs_Arc,
+    false,
+  );
+  if (!thick.IsDone()) throw new Error("Shell failed — thickness may be too large");
+  body.shape = thick.Shape();
+  body.volume = shapeVolume(oc, body.shape);
+}
+
+// ---------------------------------------------------------------- transforms
+
+const MIRROR_PLANES: Record<string, { n: [number, number, number] }> = {
+  XY: { n: [0, 0, 1] },
+  XZ: { n: [0, 1, 0] },
+  YZ: { n: [1, 0, 0] },
+};
+
+const AXIS_DIRS: Record<"x" | "y" | "z", [number, number, number]> = {
+  x: [1, 0, 0],
+  y: [0, 1, 0],
+  z: [0, 0, 1],
+};
+
+function executeMirror(oc: OpenCascadeInstance, feature: MirrorFeature, state: RegenState): void {
+  const body = state.bodies.find((b) => b.id === feature.bodyId);
+  if (!body) throw new Error(`Mirror references missing body ${feature.bodyId}`);
+  const n = MIRROR_PLANES[feature.plane]!.n;
+  const trsf = new oc.gp_Trsf_1();
+  trsf.SetMirror_3(new oc.gp_Ax2_3(new oc.gp_Pnt_3(0, 0, 0), new oc.gp_Dir_4(n[0], n[1], n[2])));
+  const mirrored = new oc.BRepBuilderAPI_Transform_2(body.shape, trsf, true).Shape();
+
+  if (feature.merge) {
+    const fuse = new oc.BRepAlgoAPI_Fuse_3(body.shape, mirrored);
+    fuse.Build();
+    if (!fuse.IsDone()) throw new Error("Mirror merge failed");
+    body.shape = fuse.Shape();
+    body.volume = shapeVolume(oc, body.shape);
+  } else {
+    state.bodies.push({ id: feature.id, shape: mirrored, volume: shapeVolume(oc, mirrored) });
+  }
+}
+
+function executeLinearPattern(
+  oc: OpenCascadeInstance,
+  feature: LinearPatternFeature,
+  state: RegenState,
+  env: (name: string) => number,
+): void {
+  const body = state.bodies.find((b) => b.id === feature.bodyId);
+  if (!body) throw new Error(`Pattern references missing body ${feature.bodyId}`);
+  const spacing = evaluateExpression(feature.spacing, env);
+  const count = Math.round(evaluateExpression(feature.count, env));
+  if (count < 2 || count > 100) throw new Error("Pattern count must be between 2 and 100");
+  if (spacing === 0) throw new Error("Pattern spacing must be nonzero");
+
+  const dir = AXIS_DIRS[feature.direction];
+  const copies: TopoDsShape[] = [body.shape];
+  for (let i = 1; i < count; i++) {
+    const trsf = new oc.gp_Trsf_1();
+    trsf.SetTranslation_1(
+      new oc.gp_Vec_4(dir[0] * spacing * i, dir[1] * spacing * i, dir[2] * spacing * i),
+    );
+    copies.push(new oc.BRepBuilderAPI_Transform_2(body.shape, trsf, true).Shape());
+  }
+  body.shape = fuseAll(oc, copies);
+  body.volume = shapeVolume(oc, body.shape);
+}
+
+function executeCircularPattern(
+  oc: OpenCascadeInstance,
+  feature: CircularPatternFeature,
+  state: RegenState,
+  env: (name: string) => number,
+): void {
+  const body = state.bodies.find((b) => b.id === feature.bodyId);
+  if (!body) throw new Error(`Pattern references missing body ${feature.bodyId}`);
+  const count = Math.round(evaluateExpression(feature.count, env));
+  if (count < 2 || count > 100) throw new Error("Pattern count must be between 2 and 100");
+
+  const dir = AXIS_DIRS[feature.axis];
+  const axis = new oc.gp_Ax1_2(new oc.gp_Pnt_3(0, 0, 0), new oc.gp_Dir_4(dir[0], dir[1], dir[2]));
+  const copies: TopoDsShape[] = [body.shape];
+  for (let i = 1; i < count; i++) {
+    const trsf = new oc.gp_Trsf_1();
+    trsf.SetRotation_1(axis, (i * 2 * Math.PI) / count);
+    copies.push(new oc.BRepBuilderAPI_Transform_2(body.shape, trsf, true).Shape());
+  }
+  body.shape = fuseAll(oc, copies);
+  body.volume = shapeVolume(oc, body.shape);
+}
+
+function executeBoolean(oc: OpenCascadeInstance, feature: BooleanFeature, state: RegenState): void {
+  const target = state.bodies.find((b) => b.id === feature.targetBodyId);
+  const toolBody = state.bodies.find((b) => b.id === feature.toolBodyId);
+  if (!target) throw new Error("Combine: target body not found");
+  if (!toolBody) throw new Error("Combine: tool body not found");
+  if (target === toolBody) throw new Error("Combine: target and tool must differ");
+
+  const op =
+    feature.op === "join"
+      ? new oc.BRepAlgoAPI_Fuse_3(target.shape, toolBody.shape)
+      : feature.op === "cut"
+        ? new oc.BRepAlgoAPI_Cut_3(target.shape, toolBody.shape)
+        : new oc.BRepAlgoAPI_Common_3(target.shape, toolBody.shape);
+  op.Build();
+  if (!op.IsDone()) throw new Error(`Combine ${feature.op} failed`);
+  target.shape = op.Shape();
+  target.volume = shapeVolume(oc, target.shape);
+  // Tool body is consumed.
+  state.bodies = state.bodies.filter((b) => b !== toolBody);
+}
+
+function executeMove(
+  oc: OpenCascadeInstance,
+  feature: MoveFeature,
+  state: RegenState,
+  env: (name: string) => number,
+): void {
+  const body = state.bodies.find((b) => b.id === feature.bodyId);
+  if (!body) throw new Error(`Move references missing body ${feature.bodyId}`);
+  const tx = evaluateExpression(feature.tx, env);
+  const ty = evaluateExpression(feature.ty, env);
+  const tz = evaluateExpression(feature.tz, env);
+  const angleDeg = evaluateExpression(feature.rotAngle, env);
+
+  let shape = body.shape;
+  if (angleDeg !== 0) {
+    const dir = AXIS_DIRS[feature.rotAxis];
+    const rot = new oc.gp_Trsf_1();
+    rot.SetRotation_1(
+      new oc.gp_Ax1_2(new oc.gp_Pnt_3(0, 0, 0), new oc.gp_Dir_4(dir[0], dir[1], dir[2])),
+      (angleDeg * Math.PI) / 180,
+    );
+    shape = new oc.BRepBuilderAPI_Transform_2(shape, rot, false).Shape();
+  }
+  if (tx !== 0 || ty !== 0 || tz !== 0) {
+    const tr = new oc.gp_Trsf_1();
+    tr.SetTranslation_1(new oc.gp_Vec_4(tx, ty, tz));
+    shape = new oc.BRepBuilderAPI_Transform_2(shape, tr, false).Shape();
+  }
+  body.shape = shape;
+  body.volume = shapeVolume(oc, body.shape);
+}
+
+// ---------------------------------------------------------------- import
+
+function base64ToBytes(b64: string): Uint8Array {
+  const bin = atob(b64);
+  const bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  return bytes;
+}
+
+function executeImportStep(
+  oc: OpenCascadeInstance,
+  feature: ImportStepFeature,
+  state: RegenState,
+): void {
+  // NOTE: this OCCT build rejects FS paths > 10 chars (see exporters.ts).
+  const path = "/i.step";
+  oc.FS.writeFile(path, base64ToBytes(feature.dataB64));
+  try {
+    const reader = new oc.STEPControl_Reader_1();
+    const stat = reader.ReadFile(path);
+    const statVal = typeof stat === "number" ? stat : stat.value;
+    if (statVal !== 1) throw new Error(`Could not read STEP file "${feature.fileName}"`);
+    reader.TransferRoots();
+    if (reader.NbShapes() === 0) throw new Error("STEP file contains no shapes");
+    const shape = reader.OneShape();
+    state.bodies.push({ id: feature.id, shape, volume: shapeVolume(oc, shape) });
+  } finally {
+    try {
+      oc.FS.unlink(path);
+    } catch {
+      // already gone
+    }
+  }
+}
+
+// Re-exported so worker code can resolve edge refs for display if needed.
+export type { EdgeRef };
