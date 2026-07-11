@@ -3,6 +3,7 @@ import * as THREE from "three";
 import { newId, type SketchFeature, type SketchProfile } from "@craftbit/core";
 import type { EvaluatedSketch } from "@craftbit/geometry-worker";
 import { SceneManager, type PickResult } from "./sceneManager";
+import { SketchDimensions } from "./SketchDimensions";
 import { useDocumentStore } from "../stores/documentStore";
 import { useGeometryStore } from "../stores/geometryStore";
 import { useUiStore } from "../stores/uiStore";
@@ -21,6 +22,8 @@ export function Viewport() {
   const managerRef = useRef<SceneManager | null>(null);
   const drawRef = useRef<DrawState | null>(null);
   const [hover, setHover] = useState<PickResult | null>(null);
+  // Manager also held in state so overlays re-render once it exists.
+  const [manager, setManager] = useState<SceneManager | null>(null);
 
   const result = useGeometryStore((s) => s.result);
   const kernelReady = useGeometryStore((s) => s.kernelReady);
@@ -29,6 +32,7 @@ export function Viewport() {
   const sketchTool = useUiStore((s) => s.sketchTool);
   const selectedFaces = useUiStore((s) => s.selectedFaces);
   const selectedEdges = useUiStore((s) => s.selectedEdges);
+  const selectedProfileId = useUiStore((s) => s.selectedProfileId);
 
   const activeSketch: EvaluatedSketch | undefined = result?.sketches.find(
     (s) => s.featureId === activeSketchId,
@@ -38,26 +42,29 @@ export function Viewport() {
   useEffect(() => {
     const container = containerRef.current;
     if (!container) return;
-    const manager = new SceneManager(container);
-    managerRef.current = manager;
+    const sceneManager = new SceneManager(container);
+    managerRef.current = sceneManager;
+    setManager(sceneManager);
+    sceneManager.resize(container.clientWidth, container.clientHeight);
     const observer = new ResizeObserver(() => {
-      manager.resize(container.clientWidth, container.clientHeight);
+      sceneManager.resize(container.clientWidth, container.clientHeight);
     });
     observer.observe(container);
     return () => {
       observer.disconnect();
-      manager.dispose();
+      sceneManager.dispose();
       managerRef.current = null;
+      setManager(null);
     };
   }, []);
 
   // --- content sync --------------------------------------------------
   useEffect(() => {
-    const manager = managerRef.current;
-    if (!manager || !result) return;
-    manager.setRegenResult(result, useDocumentStore.getState().doc.bodyColors);
-    manager.setSketches(result.sketches, activeSketchId);
-  }, [result, activeSketchId]);
+    const sceneManager = managerRef.current;
+    if (!sceneManager || !result) return;
+    sceneManager.setRegenResult(result, useDocumentStore.getState().doc.bodyColors);
+    sceneManager.setSketches(result.sketches, activeSketchId, selectedProfileId);
+  }, [result, activeSketchId, selectedProfileId]);
 
   useEffect(() => {
     managerRef.current?.setHighlights(hover, selectedFaces, selectedEdges);
@@ -213,6 +220,15 @@ export function Viewport() {
       return;
     }
 
+    // Select tool in sketch mode: click a profile outline to select it and
+    // reveal its dimension labels for editing.
+    if (mode === "sketch" && sketchTool === "select" && activeSketchId && e.button === 0) {
+      const ndc = toNdc(e);
+      const picked = manager.pickSketchProfile(ndc.x, ndc.y, activeSketchId);
+      useUiStore.getState().setSelectedProfile(picked?.profileId ?? null);
+      return;
+    }
+
     if (mode === "model" && e.button === 0) {
       const ndc = toNdc(e);
       const picked = manager.pick(ndc.x, ndc.y, "model");
@@ -282,6 +298,9 @@ export function Viewport() {
             ~14 MB compressed, cached after first load
           </div>
         </div>
+      )}
+      {mode === "sketch" && manager && activeSketch && (
+        <SketchDimensions manager={manager} sketch={activeSketch} />
       )}
     </div>
   );

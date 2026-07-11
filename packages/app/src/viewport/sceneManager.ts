@@ -39,6 +39,8 @@ export class SceneManager {
   private raycaster = new THREE.Raycaster();
   private frameId = 0;
   private disposed = false;
+  private width = 1;
+  private height = 1;
 
   constructor(container: HTMLElement) {
     this.scene.background = new THREE.Color(css("--vp-background"));
@@ -86,9 +88,32 @@ export class SceneManager {
   }
 
   resize(width: number, height: number): void {
-    this.camera.aspect = width / Math.max(1, height);
+    this.width = Math.max(1, width);
+    this.height = Math.max(1, height);
+    this.camera.aspect = this.width / this.height;
     this.camera.updateProjectionMatrix();
     this.renderer.setSize(width, height);
+  }
+
+  /** Projects a world point to viewport CSS pixels. `inFront` is false when
+   * the point is behind the camera (label should be hidden). */
+  projectToScreen(world: THREE.Vector3): { x: number; y: number; inFront: boolean } {
+    const v = world.clone().project(this.camera);
+    return {
+      x: ((v.x + 1) / 2) * this.width,
+      y: ((1 - v.y) / 2) * this.height,
+      inFront: v.z < 1,
+    };
+  }
+
+  /** Subscribe to camera/orbit changes (for repositioning HTML overlays). */
+  onViewChange(callback: () => void): () => void {
+    const controls = this.controls as unknown as {
+      addEventListener(type: string, cb: () => void): void;
+      removeEventListener(type: string, cb: () => void): void;
+    };
+    controls.addEventListener("change", callback);
+    return () => controls.removeEventListener("change", callback);
   }
 
   dispose(): void {
@@ -158,13 +183,20 @@ export class SceneManager {
     }
   }
 
-  setSketches(sketches: EvaluatedSketch[], activeSketchId: string | null): void {
+  setSketches(
+    sketches: EvaluatedSketch[],
+    activeSketchId: string | null,
+    selectedProfileId: string | null = null,
+  ): void {
     this.sketchGroup.clear();
     for (const sketch of sketches) {
       const isActive = sketch.featureId === activeSketchId;
-      const color = new THREE.Color(css(isActive ? "--vp-sketch" : "--vp-sketch-dim"));
-      const material = new THREE.LineBasicMaterial({ color });
       for (const profile of sketch.profiles) {
+        const isSelected = isActive && profile.id === selectedProfileId;
+        const color = new THREE.Color(
+          css(isSelected ? "--vp-selected" : isActive ? "--vp-sketch" : "--vp-sketch-dim"),
+        );
+        const material = new THREE.LineBasicMaterial({ color });
         const pts = profilePoints3d(sketch, profile);
         const geom = new THREE.BufferGeometry().setFromPoints(pts);
         const line = new THREE.LineLoop(geom, material);
@@ -172,6 +204,25 @@ export class SceneManager {
         this.sketchGroup.add(line);
       }
     }
+  }
+
+  /** Picks a profile of the active sketch by clicking near its outline. */
+  pickSketchProfile(
+    ndcX: number,
+    ndcY: number,
+    activeSketchId: string,
+  ): { profileId: string } | null {
+    this.raycaster.setFromCamera(new THREE.Vector2(ndcX, ndcY), this.camera);
+    const camDist = this.camera.position.distanceTo(this.controls.target);
+    this.raycaster.params.Line = { threshold: camDist * 0.02 };
+    const hits = this.raycaster.intersectObjects(this.sketchGroup.children, false);
+    for (const hit of hits) {
+      const data = hit.object.userData as { sketchId?: string; profileId?: string };
+      if (data.sketchId === activeSketchId && data.profileId) {
+        return { profileId: data.profileId };
+      }
+    }
+    return null;
   }
 
   setPreview(points: THREE.Vector3[] | null, closed: boolean): void {
