@@ -295,11 +295,18 @@ export class SceneManager {
     const y = Math.round(this.height - rect.top - rect.height);
     const size = Math.round(rect.width);
 
-    this.renderer.clearDepth();
+    // Scissor first, then clear only depth (scoped to that rect by the
+    // scissor test) — rendering this pass with the default autoClearColor
+    // would wipe the main scene's already-drawn pixels in that corner to
+    // opaque black (the renderer has no alpha channel), painting a solid
+    // box behind the cube instead of letting the model show through.
     this.renderer.setScissorTest(true);
     this.renderer.setViewport(x, y, size, size);
     this.renderer.setScissor(x, y, size, size);
+    this.renderer.clearDepth();
+    this.renderer.autoClearColor = false;
     this.renderer.render(this.viewCube.scene, this.viewCube.camera);
+    this.renderer.autoClearColor = true;
     this.renderer.setScissorTest(false);
     this.renderer.setViewport(0, 0, this.width, this.height);
   }
