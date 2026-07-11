@@ -7,11 +7,37 @@
 import * as THREE from "three";
 import { OrbitControls } from "three/addons/controls/OrbitControls.js";
 import type { BodyResult, EvaluatedSketch, RegenResult } from "@craftbit/geometry-worker";
+import {
+  type CubeZone,
+  type OrientationFrame,
+  buildViewCubeScene,
+  classifyHit,
+  easeInOutCubic,
+  makeOrientationInterpolator,
+  upForDir,
+} from "./viewCube";
 
 export interface PickResult {
   kind: "face" | "edge";
   bodyId: string;
   index: number;
+}
+
+/** CSS-pixel size/inset of the ViewCube square, anchored to the top-right corner. */
+export const CUBE_SIZE_PX = 96;
+export const CUBE_PAD_PX = 12;
+/** Below this container width the cube is hidden — it would occlude too much on small screens. */
+export const CUBE_HIDE_BELOW_WIDTH = 480;
+
+interface PendingOrientation {
+  interp: (progress: number) => OrientationFrame;
+  fromTarget: THREE.Vector3;
+  toTarget: THREE.Vector3;
+  fromDistance: number;
+  toDistance: number;
+  startTime: number;
+  duration: number;
+  finalDir: THREE.Vector3;
 }
 
 interface BodyObjects {
@@ -42,7 +68,15 @@ export class SceneManager {
   private width = 1;
   private height = 1;
 
+  private container: HTMLElement;
+  private viewCube: ReturnType<typeof buildViewCubeScene>;
+  private defaultDir: THREE.Vector3;
+  private defaultTarget: THREE.Vector3;
+  private pendingOrientation: PendingOrientation | null = null;
+  private dampingBeforeOrientation = true;
+
   constructor(container: HTMLElement) {
+    this.container = container;
     this.scene.background = new THREE.Color(css("--vp-background"));
     this.camera = new THREE.PerspectiveCamera(
       45,
@@ -63,6 +97,9 @@ export class SceneManager {
     this.controls.enableDamping = true;
     this.controls.target.set(30, 20, 0);
 
+    this.defaultTarget = this.controls.target.clone();
+    this.defaultDir = this.camera.position.clone().sub(this.controls.target).normalize();
+
     this.scene.add(new THREE.HemisphereLight(0xffffff, 0x33343a, 2.0));
     const key = new THREE.DirectionalLight(0xffffff, 1.4);
     key.position.set(200, -250, 350);
@@ -78,10 +115,20 @@ export class SceneManager {
 
     this.scene.add(this.bodyGroup, this.sketchGroup, this.previewGroup, this.highlightGroup);
 
+    this.viewCube = buildViewCubeScene({
+      bg: css("--bg-raised"),
+      text: css("--text-primary"),
+      border: css("--border-hairline"),
+      wireframe: css("--border-strong"),
+      hover: css("--vp-hover"),
+    });
+
     const loop = () => {
       if (this.disposed) return;
+      this.stepOrientation();
       this.controls.update();
       this.renderer.render(this.scene, this.camera);
+      this.renderCubeInset();
       this.frameId = requestAnimationFrame(loop);
     };
     loop();
@@ -93,6 +140,154 @@ export class SceneManager {
     this.camera.aspect = this.width / this.height;
     this.camera.updateProjectionMatrix();
     this.renderer.setSize(width, height);
+  }
+
+  // ------------------------------------------------------------ ViewCube
+
+  isViewCubeVisible(): boolean {
+    return this.width >= CUBE_HIDE_BELOW_WIDTH;
+  }
+
+  /** CSS-pixel rect of the cube square, relative to the container. Null when hidden. */
+  getViewCubeRect(): { left: number; top: number; width: number; height: number } | null {
+    if (!this.isViewCubeVisible()) return null;
+    return {
+      left: this.width - CUBE_SIZE_PX - CUBE_PAD_PX,
+      top: CUBE_PAD_PX,
+      width: CUBE_SIZE_PX,
+      height: CUBE_SIZE_PX,
+    };
+  }
+
+  private cubeLocalNdc(containerX: number, containerY: number): { x: number; y: number } | null {
+    const rect = this.getViewCubeRect();
+    if (!rect) return null;
+    const lx = containerX - rect.left;
+    const ly = containerY - rect.top;
+    if (lx < 0 || ly < 0 || lx > rect.width || ly > rect.height) return null;
+    return { x: (lx / rect.width) * 2 - 1, y: -(ly / rect.height) * 2 + 1 };
+  }
+
+  /** Raycasts the cube from a container-relative CSS point; null outside the cube rect. */
+  pickViewCubeZone(containerX: number, containerY: number): CubeZone | null {
+    const ndc = this.cubeLocalNdc(containerX, containerY);
+    if (!ndc) return null;
+    this.raycaster.setFromCamera(new THREE.Vector2(ndc.x, ndc.y), this.viewCube.camera);
+    const hit = this.raycaster.intersectObject(this.viewCube.mesh, false)[0];
+    if (!hit) return null;
+    return classifyHit(hit.point);
+  }
+
+  /** Updates the cube hover highlight from a container-relative CSS point. */
+  setViewCubeHover(containerX: number | null, containerY: number | null): CubeZone | null {
+    const zone =
+      containerX === null || containerY === null
+        ? null
+        : this.pickViewCubeZone(containerX, containerY);
+    this.viewCube.setHover(zone);
+    return zone;
+  }
+
+  /** Orbits the main camera by a drag delta in CSS px, same convention as OrbitControls
+   * but computed directly so cube drags work without depending on its internals. */
+  orbitCubeBy(dxPx: number, dyPx: number): void {
+    this.cancelOrientation();
+    const up = this.camera.up.clone().normalize();
+    const quat = new THREE.Quaternion().setFromUnitVectors(up, new THREE.Vector3(0, 1, 0));
+    const quatInverse = quat.clone().invert();
+    const offset = this.camera.position.clone().sub(this.controls.target).applyQuaternion(quat);
+    const spherical = new THREE.Spherical().setFromVector3(offset);
+    spherical.theta -= dxPx * 0.01;
+    spherical.phi -= dyPx * 0.01;
+    spherical.phi = Math.max(0.001, Math.min(Math.PI - 0.001, spherical.phi));
+    const newOffset = new THREE.Vector3().setFromSpherical(spherical).applyQuaternion(quatInverse);
+    this.camera.position.copy(this.controls.target.clone().add(newOffset));
+    this.camera.lookAt(this.controls.target);
+    this.camera.up.copy(up);
+    this.controls.update();
+  }
+
+  /** Animates the camera to look along `dir` (unit vector, from target toward camera).
+   * Target and distance stay fixed unless overridden (used by `homeView`). */
+  orientTo(dir: THREE.Vector3, opts: { target?: THREE.Vector3; distance?: number } = {}): void {
+    const toDir = dir.clone().normalize();
+    const fromDir = this.camera.position.clone().sub(this.controls.target).normalize();
+    const fromTarget = this.controls.target.clone();
+    const toTarget = opts.target?.clone() ?? fromTarget.clone();
+    const fromDistance = this.camera.position.distanceTo(this.controls.target);
+    const toDistance = opts.distance ?? fromDistance;
+    const fromUp = this.camera.up.clone().normalize();
+    const toUp = upForDir(toDir);
+    const interp = makeOrientationInterpolator(fromDir, toDir, fromUp, toUp);
+
+    this.dampingBeforeOrientation = this.controls.enableDamping;
+    this.controls.enableDamping = false;
+    this.pendingOrientation = {
+      interp,
+      fromTarget,
+      toTarget,
+      fromDistance,
+      toDistance,
+      startTime: performance.now(),
+      duration: 350,
+      finalDir: toDir,
+    };
+  }
+
+  /** Cancels any in-flight `orientTo` animation, leaving the camera where it currently is. */
+  cancelOrientation(): void {
+    if (!this.pendingOrientation) return;
+    this.pendingOrientation = null;
+    this.controls.enableDamping = this.dampingBeforeOrientation;
+  }
+
+  /** Restores the default iso view, refit to whatever bodies currently exist. */
+  homeView(): void {
+    const box = this.bodiesBoundingBox();
+    const target = box ? box.getCenter(new THREE.Vector3()) : this.defaultTarget.clone();
+    const size = box ? box.getSize(new THREE.Vector3()).length() || 200 : 200;
+    this.orientTo(this.defaultDir.clone(), { target, distance: size * 1.6 });
+  }
+
+  private stepOrientation(): void {
+    const po = this.pendingOrientation;
+    if (!po) return;
+    const t = Math.min(1, (performance.now() - po.startTime) / po.duration);
+    const frame = po.interp(t);
+    const eased = easeInOutCubic(t);
+    const target = po.fromTarget.clone().lerp(po.toTarget, eased);
+    const distance = po.fromDistance + (po.toDistance - po.fromDistance) * eased;
+    this.controls.target.copy(target);
+    this.camera.position.copy(target.clone().add(frame.dir.clone().multiplyScalar(distance)));
+    this.camera.up.copy(frame.up);
+    if (t >= 1) {
+      this.pendingOrientation = null;
+      this.controls.enableDamping = this.dampingBeforeOrientation;
+      const d = po.finalDir;
+      this.container.dataset.viewDir = `${d.x.toFixed(4)},${d.y.toFixed(4)},${d.z.toFixed(4)}`;
+    }
+  }
+
+  private renderCubeInset(): void {
+    if (!this.isViewCubeVisible()) return;
+    const dist = 3;
+    const dir = this.camera.position.clone().sub(this.controls.target).normalize();
+    this.viewCube.camera.position.copy(dir.multiplyScalar(dist));
+    this.viewCube.camera.up.copy(this.camera.up);
+    this.viewCube.camera.lookAt(0, 0, 0);
+
+    const rect = this.getViewCubeRect()!;
+    const x = Math.round(rect.left);
+    const y = Math.round(this.height - rect.top - rect.height);
+    const size = Math.round(rect.width);
+
+    this.renderer.clearDepth();
+    this.renderer.setScissorTest(true);
+    this.renderer.setViewport(x, y, size, size);
+    this.renderer.setScissor(x, y, size, size);
+    this.renderer.render(this.viewCube.scene, this.viewCube.camera);
+    this.renderer.setScissorTest(false);
+    this.renderer.setViewport(0, 0, this.width, this.height);
   }
 
   /** Projects a world point to viewport CSS pixels. `inFront` is false when
@@ -120,6 +315,7 @@ export class SceneManager {
     this.disposed = true;
     cancelAnimationFrame(this.frameId);
     this.controls.dispose();
+    this.viewCube.dispose();
     this.renderer.dispose();
     this.renderer.domElement.remove();
   }
@@ -372,14 +568,19 @@ export class SceneManager {
     this.controls.update();
   }
 
-  fitAll(): void {
+  private bodiesBoundingBox(): THREE.Box3 | null {
     const box = new THREE.Box3();
     let has = false;
     for (const { mesh } of this.bodies.values()) {
       box.expandByObject(mesh);
       has = true;
     }
-    if (!has) return;
+    return has ? box : null;
+  }
+
+  fitAll(): void {
+    const box = this.bodiesBoundingBox();
+    if (!box) return;
     const center = box.getCenter(new THREE.Vector3());
     const size = box.getSize(new THREE.Vector3()).length() || 100;
     const dir = this.camera.position.clone().sub(this.controls.target).normalize();

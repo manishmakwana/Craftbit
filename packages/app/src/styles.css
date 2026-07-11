@@ -412,6 +412,33 @@ button {
   z-index: 5;
 }
 
+/* ViewCube's Home button sits just left of the cube inset (D7); position is
+   set inline from the same CUBE_SIZE_PX/CUBE_PAD_PX constants sceneManager
+   uses to lay out the cube itself, so the two never drift apart. */
+.viewcube-home-btn {
+  position: absolute;
+  width: 24px;
+  height: 24px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--border-hairline);
+  border-radius: var(--radius-control);
+  background: var(--bg-raised);
+  color: var(--text-secondary);
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+  z-index: 12;
+  transition:
+    background var(--motion-micro),
+    color var(--motion-micro);
+}
+.viewcube-home-btn:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
 .plane-chooser {
   position: absolute;
   top: var(--space-3);

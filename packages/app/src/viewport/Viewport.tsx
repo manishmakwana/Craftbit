@@ -2,13 +2,15 @@ import { useEffect, useRef, useState } from "react";
 import * as THREE from "three";
 import { newId, type SketchFeature, type SketchProfile } from "@craftbit/core";
 import type { EvaluatedSketch } from "@craftbit/geometry-worker";
-import { SceneManager, type PickResult } from "./sceneManager";
+import { CUBE_PAD_PX, CUBE_SIZE_PX, SceneManager, type PickResult } from "./sceneManager";
 import { SketchDimensions } from "./SketchDimensions";
 import { useDocumentStore } from "../stores/documentStore";
 import { useGeometryStore } from "../stores/geometryStore";
 import { useUiStore } from "../stores/uiStore";
 
 const fmtNum = (n: number) => String(Math.round(n * 100) / 100);
+/** Drag distance (CSS px) below which a cube pointerdown/up pair counts as a click, not an orbit. */
+const CUBE_CLICK_SLOP = 4;
 
 interface DrawState {
   tool: "rect" | "circle" | "polygon";
@@ -17,13 +19,22 @@ interface DrawState {
   polygonPoints: { x: number; y: number }[];
 }
 
+interface CubeDragState {
+  lastX: number;
+  lastY: number;
+  totalMove: number;
+}
+
 export function Viewport() {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const managerRef = useRef<SceneManager | null>(null);
   const drawRef = useRef<DrawState | null>(null);
+  const cubeDragRef = useRef<CubeDragState | null>(null);
   const [hover, setHover] = useState<PickResult | null>(null);
   // Manager also held in state so overlays re-render once it exists.
   const [manager, setManager] = useState<SceneManager | null>(null);
+  const [cubeVisible, setCubeVisible] = useState(true);
+  const [cubeHovering, setCubeHovering] = useState(false);
 
   const result = useGeometryStore((s) => s.result);
   const kernelReady = useGeometryStore((s) => s.kernelReady);
@@ -46,8 +57,10 @@ export function Viewport() {
     managerRef.current = sceneManager;
     setManager(sceneManager);
     sceneManager.resize(container.clientWidth, container.clientHeight);
+    setCubeVisible(sceneManager.isViewCubeVisible());
     const observer = new ResizeObserver(() => {
       sceneManager.resize(container.clientWidth, container.clientHeight);
+      setCubeVisible(sceneManager.isViewCubeVisible());
     });
     observer.observe(container);
     return () => {
@@ -92,6 +105,23 @@ export function Viewport() {
     };
   };
 
+  // Container-relative CSS px, used by the ViewCube (which picks in its own
+  // inset viewport rather than the main NDC space).
+  const toLocal = (e: React.PointerEvent | React.MouseEvent): { x: number; y: number } => {
+    const rect = containerRef.current!.getBoundingClientRect();
+    return { x: e.clientX - rect.left, y: e.clientY - rect.top };
+  };
+
+  const inCubeRect = (
+    local: { x: number; y: number },
+    rect: { left: number; top: number; width: number; height: number } | null,
+  ): boolean =>
+    !!rect &&
+    local.x >= rect.left &&
+    local.y >= rect.top &&
+    local.x <= rect.left + rect.width &&
+    local.y <= rect.top + rect.height;
+
   const commitProfile = (profile: SketchProfile) => {
     const { doc, dispatch } = useDocumentStore.getState();
     const sketch = doc.features.find((f) => f.id === activeSketchId);
@@ -134,6 +164,19 @@ export function Viewport() {
   const onPointerDown = (e: React.PointerEvent) => {
     const manager = managerRef.current;
     if (!manager || e.button !== 0) return;
+    // Any deliberate interaction with the viewport interrupts an in-flight
+    // ViewCube animation (a cube click that starts its own animation calls
+    // orientTo again afterward, which is fine).
+    manager.cancelOrientation();
+
+    // ViewCube intercepts before any sketch/model interaction, regardless of
+    // current mode or tool — it's an always-on navigation affordance.
+    const local = toLocal(e);
+    if (inCubeRect(local, manager.getViewCubeRect())) {
+      cubeDragRef.current = { lastX: local.x, lastY: local.y, totalMove: 0 };
+      (e.target as Element).setPointerCapture(e.pointerId);
+      return;
+    }
 
     if (mode === "sketch" && activeSketch && sketchTool !== "select") {
       const ndc = toNdc(e);
@@ -163,6 +206,30 @@ export function Viewport() {
   const onPointerMove = (e: React.PointerEvent) => {
     const manager = managerRef.current;
     if (!manager) return;
+
+    const cubeDrag = cubeDragRef.current;
+    if (cubeDrag) {
+      const local = toLocal(e);
+      const dx = local.x - cubeDrag.lastX;
+      const dy = local.y - cubeDrag.lastY;
+      cubeDrag.lastX = local.x;
+      cubeDrag.lastY = local.y;
+      cubeDrag.totalMove += Math.hypot(dx, dy);
+      manager.orbitCubeBy(dx, dy);
+      return;
+    }
+
+    const local = toLocal(e);
+    if (inCubeRect(local, manager.getViewCubeRect())) {
+      manager.setViewCubeHover(local.x, local.y);
+      setCubeHovering(true);
+      return;
+    }
+    if (cubeHovering) {
+      manager.setViewCubeHover(null, null);
+      setCubeHovering(false);
+    }
+
     const ndc = toNdc(e);
 
     if (mode === "sketch" && activeSketch) {
@@ -186,6 +253,17 @@ export function Viewport() {
     const manager = managerRef.current;
     const draw = drawRef.current;
     if (!manager) return;
+
+    const cubeDrag = cubeDragRef.current;
+    if (cubeDrag) {
+      cubeDragRef.current = null;
+      if (cubeDrag.totalMove < CUBE_CLICK_SLOP) {
+        const local = toLocal(e);
+        const zone = manager.pickViewCubeZone(local.x, local.y);
+        if (zone) manager.orientTo(zone.dir);
+      }
+      return;
+    }
 
     if (mode === "sketch" && draw && draw.tool !== "polygon") {
       manager.controls.enabled = true;
@@ -243,6 +321,15 @@ export function Viewport() {
     }
   };
 
+  const onPointerLeave = () => {
+    // Only clears the hover highlight — an in-progress cube drag keeps
+    // receiving events via pointer capture even once the cursor leaves.
+    if (!cubeDragRef.current && cubeHovering) {
+      managerRef.current?.setViewCubeHover(null, null);
+      setCubeHovering(false);
+    }
+  };
+
   const onDoubleClick = () => {
     const draw = drawRef.current;
     if (mode === "sketch" && draw?.tool === "polygon") {
@@ -285,9 +372,11 @@ export function Viewport() {
     <div
       className="viewport-root"
       ref={containerRef}
+      style={cubeHovering ? { cursor: "pointer" } : undefined}
       onPointerDown={onPointerDown}
       onPointerMove={onPointerMove}
       onPointerUp={onPointerUp}
+      onPointerLeave={onPointerLeave}
       onDoubleClick={onDoubleClick}
       data-testid="viewport"
     >
@@ -301,6 +390,18 @@ export function Viewport() {
       )}
       {mode === "sketch" && manager && activeSketch && (
         <SketchDimensions manager={manager} sketch={activeSketch} />
+      )}
+      {cubeVisible && (
+        <button
+          type="button"
+          className="viewcube-home-btn"
+          style={{ top: CUBE_PAD_PX, right: CUBE_PAD_PX + CUBE_SIZE_PX + 8 }}
+          title="Home view"
+          data-testid="viewcube-home"
+          onClick={() => managerRef.current?.homeView()}
+        >
+          ⌂
+        </button>
       )}
     </div>
   );
