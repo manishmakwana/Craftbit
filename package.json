@@ -1,0 +1,38 @@
+{
+  "name": "craftbit",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "license": "MPL-2.0",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "dev": "pnpm --filter @craftbit/app dev",
+    "build": "pnpm -r build",
+    "typecheck": "pnpm -r typecheck",
+    "lint": "eslint .",
+    "format": "prettier --check .",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "perf:fps": "node perf/measure-fps.mjs"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.17.0",
+    "eslint": "^9.17.0",
+    "eslint-plugin-react-hooks": "^5.1.0",
+    "globals": "^17.7.0",
+    "playwright": "^1.61.1",
+    "prettier": "^3.4.2",
+    "typescript": "^5.7.2",
+    "typescript-eslint": "^8.18.0",
+    "vitest": "^2.1.8"
+  },
+  "packageManager": "pnpm@10.33.0",
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "esbuild",
+      "playwright"
+    ]
+  }
+}

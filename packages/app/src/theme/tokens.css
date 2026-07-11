@@ -1,0 +1,68 @@
+/*
+ * Design tokens (spec §7.0.2). Components consume tokens only — no hard-coded
+ * colors in component styles. Dark theme is the default; light theme lands
+ * with the theme switcher in a later milestone.
+ */
+
+:root {
+  /* Neutral scale (dark) */
+  --bg-app: #17181b;
+  --bg-panel: #1e2024;
+  --bg-raised: #26282e;
+  --bg-hover: #2e3138;
+  --bg-active: #3a3e47;
+  --border-hairline: #33363d;
+  --border-strong: #4a4e58;
+
+  /* Text */
+  --text-primary: #e6e7ea;
+  --text-secondary: #a3a7b0;
+  --text-disabled: #6b6f78;
+
+  /* Accent & semantic */
+  --accent: #6ea8fe;
+  --accent-strong: #8ab4f8;
+  --accent-muted: rgba(110, 168, 254, 0.18);
+  --success: #4ade80;
+  --warning: #fbbf24;
+  --danger: #f87171;
+
+  /* Viewport geometry colors */
+  --vp-background: #1a1b1e;
+  --vp-body-default: #8ab4f8;
+  --vp-edge: #0e0f11;
+  --vp-hover: #ffd76e;
+  --vp-selected: #ffb020;
+  --vp-sketch: #6ee7b7;
+  --vp-sketch-dim: #3b6f57;
+  --vp-preview: #fda4af;
+
+  /* Radii, spacing, type */
+  --radius-control: 4px;
+  --radius-card: 8px;
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --font-ui: Inter, system-ui, -apple-system, "Segoe UI", sans-serif;
+  --text-xs: 11px;
+  --text-sm: 13px;
+  --text-md: 15px;
+  --text-lg: 20px;
+  --control-height: 28px;
+
+  /* Elevation */
+  --shadow-raised: 0 1px 3px rgba(0, 0, 0, 0.4);
+  --shadow-overlay: 0 8px 24px rgba(0, 0, 0, 0.5);
+
+  /* Motion (respects prefers-reduced-motion below) */
+  --motion-micro: 150ms ease-out;
+  --motion-panel: 250ms ease-out;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --motion-micro: 0ms;
+    --motion-panel: 0ms;
+  }
+}

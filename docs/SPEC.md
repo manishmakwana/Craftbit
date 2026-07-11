@@ -1229,24 +1229,61 @@ Ordered so each milestone is independently demoable and de-risks the scariest it
 (AI agents: complete milestones in order; within a milestone, the bullet order is the
 dependency order.)
 
+### 12.1 Design-first gates (MANDATORY for AI agents)
+
+Some subsystems are too intricate to code directly from this spec — they need a deeper
+design document first. These are the **design gates** below. The rule for AI agents:
+
+> **Before writing any implementation code for a gated subsystem, write its design
+> document to `docs/design/D<N>-<slug>.md`, answering every "Must answer" item below,
+> and commit it in its own PR. Only then implement, and implement exactly what the
+> design doc says.** The design doc is written at the start of its milestone (never
+> earlier — it must incorporate what prior milestones taught, e.g. real OCCT WASM
+> behavior and performance numbers). If implementation reveals the design was wrong,
+> update the design doc in the same PR as the code change — the doc and the code must
+> never disagree. Tests for a gated subsystem are derived from its design doc, not
+> improvised. Implementation PRs must link the design doc they follow.
+
+Each design doc uses this template: **Context** (spec sections it serves, constraints) →
+**Decisions** (with alternatives considered and why rejected) → **Detailed design**
+(data structures, algorithms, message/API shapes — real TypeScript signatures) →
+**Failure modes & recovery** → **Test plan** (enumerated cases) → **Open questions**
+(must be empty before implementation starts).
+
+| Gate | Milestone | Subsystem | Must answer |
+|---|---|---|---|
+| **D1** | M0–M1 | **Worker RPC protocol & kernel lifecycle** | Exact message schemas main↔geometry↔sketch workers (typed, versioned); generation-number staleness protocol (§4.1); cancellation of in-flight kernel ops; error serialization across the worker boundary; transferable buffer layouts (positions/normals/face-ID/edge-ID maps); worker crash detection & automatic restart with state re-hydration; OCCT memory management rules (who deletes shapes, handle lifetimes). |
+| **D2** | M2 | **Topological naming scheme** (§4.3) | Name string grammar; per-feature-type naming rules for every OCCT operation used (extrude, revolve, fillet, chamfer, shell, boolean, pattern, mirror) using `Generated/Modified/IsDeleted` history; disambiguation when one input maps to N outputs (e.g. a split face); name resolution algorithm + failure semantics (must fail loudly, never guess — §4.3); name migration on feature reorder/suppress; the fixture torture-set list (≥ 40 named cases, e.g. "fillet an edge, then split its face upstream"); serialization format of names in `document.json`. |
+| **D3** | M3 | **Sketcher–solver integration & region finding** (§7.6) | Mapping from sketch schema (§6.3) to PlaneGCS parameters/constraints; incremental re-solve protocol during drag (what is re-sent vs. cached, target ≤ 20 ms median); DOF computation & display; conflict/redundancy diagnostics extraction and mapping back to constraint IDs; constraint inference rules while drawing (exact snap priority order & tolerances); trim/extend constraint-repair rules; the planar region-finding algorithm (curve arrangement, tolerance policy for near-coincident endpoints) and region identity stability across solves (regions must keep IDs so Extrude profile refs survive sketch edits). |
+| **D4** | M5 | **Fabrication export pipeline** (§7.13) | Face→wire extraction and orientation rules (outer vs. holes); kerf offset via OCCT 2D offset incl. arc preservation, failure detection (self-intersection) and per-contour skip reporting; SVG/DXF writer entity mapping tables (which OCCT curve types → which SVG/DXF entities, with fitting tolerances); STL/3MF tessellation quality → Manifold validate/repair pipeline state machine (validate → repair → re-validate → block/escape-hatch); multi-face auto-layout algorithm; golden-file test format & comparison tolerances. |
+| **D5** | M6 | **Import & re-import matching** (§7.12) | Per-format entity mapping tables (STEP/STL/DXF/SVG → document model); unit/scale detection rules per format incl. the SVG dpi-confirm flow; the "Replace source file" shape-matching heuristic (centroid+area tolerance thresholds, tie-breaking, partial-match UX); large-file streaming/progress/abort strategy (§7.12 AC2); malformed-input taxonomy and its user-facing error messages. |
+| **D6** | M7 | **Joint model & drag kinematics** (§7.10) | Joint math per type (rigid/revolute/slider/cylindrical) as transform constraints; joint-origin snap-point detection & priority; the single-chain forward solve for viewport dragging (chain extraction, loop detection, the first-joint-priority rule and its warning); limits (min/max angle/offset) representation; grounding semantics; how joints re-anchor via TopoRefs after regeneration and their failure/reattach behavior. |
+
+Everything **not** listed here (UI panels, dialogs, storage, units, parameters,
+measurement, undo, onboarding) is specified in enough detail in §6–§7 to implement
+directly — do not create design docs for those; go straight to code against the ACs.
+
 - **M0 — Skeleton (foundation):** repo scaffolding, CI, Vite app shell, kernel WASM build
   loading in a worker with a "make a box, tessellate, render in Three.js" smoke test;
-  perf harness skeleton. *Demo: a hardcoded box orbiting at 60 fps.*
-- **M1 — Viewport & document core:** design tokens + shared UI component library
-  (§7.0), §7.1 shell, §7.4 viewport, §7.5 selection,
+  perf harness skeleton. **Design gate D1 (draft)** — write the first version of the
+  worker-RPC design doc alongside the smoke test. *Demo: a hardcoded box orbiting at 60 fps.*
+- **M1 — Viewport & document core:** **finalize design gate D1**, then: design tokens +
+  shared UI component library (§7.0), §7.1 shell, §7.4 viewport, §7.5 selection,
   document model + commands + undo (§6, §7.14), storage/autosave (§7.2), units (§7.3).
   *Demo: create primitive boxes via a debug command, select faces, undo, refresh-restore.*
-- **M2 — Regeneration engine + topological naming (the risk milestone):** §4.3 in full,
-  Extrude from hardcoded sketches, edit/rollback plumbing (§7.8 minimal). *Demo: GP-4
-  mechanics on a scripted document.* Do not proceed until naming survives the fixture
-  torture set.
-- **M3 — Sketcher:** §7.6 complete. *Demo: fully-constrain a bracket profile.*
+- **M2 — Regeneration engine + topological naming (the risk milestone):** **design gate
+  D2 first**, then §4.3 in full, Extrude from hardcoded sketches, edit/rollback plumbing
+  (§7.8 minimal). *Demo: GP-4 mechanics on a scripted document.* Do not proceed until
+  naming survives the D2 fixture torture set.
+- **M3 — Sketcher:** **design gate D3 first**, then §7.6 complete. *Demo: fully-constrain
+  a bracket profile.*
 - **M4 — Modeling features:** §7.7 complete, parameters (§7.9), timeline UI (§7.8)
-  complete. *Demo: GP-1, GP-4 pass in Playwright.*
-- **M5 — Export:** §7.13 complete with validation gates. *Demo: GP-2 passes; STL prints
-  (manual).*
-- **M6 — Import:** §7.12. *Demo: GP-5 passes.*
-- **M7 — Assembly:** §7.10, measurement (§7.11). *Demo: GP-3 passes.*
+  complete. No new design gate (builds on D1/D2). *Demo: GP-1, GP-4 pass in Playwright.*
+- **M5 — Export:** **design gate D4 first**, then §7.13 complete with validation gates.
+  *Demo: GP-2 passes; STL prints (manual).*
+- **M6 — Import:** **design gate D5 first**, then §7.12. *Demo: GP-5 passes.*
+- **M7 — Assembly:** **design gate D6 first**, then §7.10, measurement (§7.11).
+  *Demo: GP-3 passes.*
 - **M8 — Polish & release:** onboarding (§7.16), touch/tablet pass (§7.15), perf budget
   enforcement (§8), PWA/offline, licenses page, docs site, release checklist run.
   *Demo: public beta.*
