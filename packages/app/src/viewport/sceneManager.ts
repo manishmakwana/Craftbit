@@ -115,12 +115,16 @@ export class SceneManager {
 
     this.scene.add(this.bodyGroup, this.sketchGroup, this.previewGroup, this.highlightGroup);
 
+    // Fixed light palette (not app-theme tokens): Fusion's ViewCube reads the
+    // same way regardless of app theme, and a light cube stays legible
+    // against the dark viewport background in a way a dark-on-dark cube
+    // wasn't.
     this.viewCube = buildViewCubeScene({
-      bg: css("--bg-raised"),
-      text: css("--text-primary"),
-      border: css("--border-hairline"),
-      wireframe: css("--border-strong"),
-      hover: css("--vp-hover"),
+      bg: "#e3e5ea",
+      text: "#31343c",
+      border: "#a7adb8",
+      wireframe: "#7d8292",
+      hover: "#3b82f6",
     });
 
     const loop = () => {

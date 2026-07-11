@@ -126,7 +126,16 @@ export function makeOrientationInterpolator(
   };
 }
 
-/** Generates a label texture for one cube face on an offscreen canvas. */
+/** Lightens (positive `lDelta`) or darkens (negative) a CSS color by HSL lightness offset. */
+function shade(color: string, lDelta: number): string {
+  const c = new THREE.Color(color);
+  c.offsetHSL(0, 0, lDelta);
+  return c.getStyle();
+}
+
+/** Generates a label texture for one cube face on an offscreen canvas. A soft
+ * diagonal gradient (rather than a flat fill) gives the face a subtle sheen,
+ * closer to Fusion 360's cube than a flat color swatch. */
 function makeFaceTexture(
   label: string,
   colors: { bg: string; text: string; border: string },
@@ -136,13 +145,16 @@ function makeFaceTexture(
   canvas.width = size;
   canvas.height = size;
   const ctx = canvas.getContext("2d")!;
-  ctx.fillStyle = colors.bg;
+  const grad = ctx.createLinearGradient(0, 0, size, size);
+  grad.addColorStop(0, shade(colors.bg, 0.06));
+  grad.addColorStop(1, shade(colors.bg, -0.04));
+  ctx.fillStyle = grad;
   ctx.fillRect(0, 0, size, size);
   ctx.strokeStyle = colors.border;
-  ctx.lineWidth = 6;
-  ctx.strokeRect(3, 3, size - 6, size - 6);
+  ctx.lineWidth = 3;
+  ctx.strokeRect(1.5, 1.5, size - 3, size - 3);
   ctx.fillStyle = colors.text;
-  ctx.font = "600 34px Inter, system-ui, sans-serif";
+  ctx.font = "600 32px Inter, system-ui, sans-serif";
   ctx.textAlign = "center";
   ctx.textBaseline = "middle";
   ctx.fillText(label, size / 2, size / 2);
@@ -161,6 +173,67 @@ const BOX_FACE_DIRS: [number, number, number][] = [
   [0, 0, -1],
 ];
 
+type Axis = 0 | 1 | 2;
+
+/** One rectangular patch lying flush on a single cube face, in that face's
+ * own (u, v) coordinates (the two axes other than its normal). */
+export interface HighlightRect {
+  axis: Axis;
+  sign: 1 | -1;
+  uAxis: Axis;
+  vAxis: Axis;
+  uMin: number;
+  uMax: number;
+  vMin: number;
+  vMax: number;
+}
+
+/**
+ * Decomposes a zone into 1–3 face-local rectangles (one per contributing
+ * face) whose union is exactly the zone's hit-test region from
+ * `classifyHit`, so the hover highlight is WYSIWYG with what's clickable:
+ * a face zone lights a centered square on its one face; an edge zone lights
+ * a strip on each of its two faces, flush against their shared edge; a
+ * corner zone lights a small square in the corner of each of its three
+ * faces. (The previous implementation placed a single oversized plane at
+ * `zone.dir * distance`, which for edge/corner zones is a point *inside*
+ * the cube, not on any face — hence the floating, misaligned patch.)
+ */
+export function highlightRectsForZone(zone: CubeZone): HighlightRect[] {
+  const h = CUBE_HALF_EXTENT;
+  const t = h * ZONE_THRESHOLD_RATIO;
+  const signOf = (c: number): -1 | 0 | 1 => (Math.abs(c) < 1e-6 ? 0 : c > 0 ? 1 : -1);
+  const comps: [-1 | 0 | 1, -1 | 0 | 1, -1 | 0 | 1] = [
+    signOf(zone.dir.x),
+    signOf(zone.dir.y),
+    signOf(zone.dir.z),
+  ];
+  // Non-pulled axes span the central band [-t, t]; pulled axes span the
+  // outer band between the threshold and the cube edge, on the pulled side.
+  const range = (compSign: -1 | 0 | 1): [number, number] => {
+    if (compSign === 0) return [-t, t];
+    const a = compSign * t;
+    const b = compSign * h;
+    return a < b ? [a, b] : [b, a];
+  };
+  const rects: HighlightRect[] = [];
+  for (const axis of [0, 1, 2] as const) {
+    const sign = comps[axis];
+    if (sign === 0) continue;
+    const [uAxis, vAxis] = ([0, 1, 2] as const).filter((a) => a !== axis) as [Axis, Axis];
+    const [uMin, uMax] = range(comps[uAxis]);
+    const [vMin, vMax] = range(comps[vAxis]);
+    rects.push({ axis, sign, uAxis, vAxis, uMin, uMax, vMin, vMax });
+  }
+  return rects;
+}
+
+function axisVector(axis: Axis, sign = 1): THREE.Vector3 {
+  const v = new THREE.Vector3();
+  v.setComponent(axis, sign);
+  return v;
+}
+
 export interface CubeColors {
   bg: string;
   text: string;
@@ -173,10 +246,14 @@ export interface ViewCubeScene {
   scene: THREE.Scene;
   camera: THREE.PerspectiveCamera;
   mesh: THREE.Mesh;
-  hoverPatch: THREE.Mesh;
   setHover(zone: CubeZone | null): void;
   dispose(): void;
 }
+
+/** Max simultaneous highlight patches — a corner zone touches 3 faces. */
+const HIGHLIGHT_POOL_SIZE = 3;
+/** Nudges patches just off the cube surface to avoid z-fighting with the face texture. */
+const HIGHLIGHT_SURFACE_OFFSET = 0.006;
 
 /** Builds the small self-contained scene rendered in the corner inset. */
 export function buildViewCubeScene(colors: CubeColors): ViewCubeScene {
@@ -204,40 +281,55 @@ export function buildViewCubeScene(colors: CubeColors): ViewCubeScene {
   );
   scene.add(wire);
 
-  // Reused translucent patch for hover highlight, repositioned per zone.
+  // A small pool of reused flush face-patches — one per contributing face —
+  // rather than a single plane, so edge/corner highlights sit exactly on the
+  // cube's surface instead of floating at a point inside it.
   const hoverGeom = new THREE.PlaneGeometry(1, 1);
   const hoverMat = new THREE.MeshBasicMaterial({
     color: new THREE.Color(colors.hover),
     transparent: true,
-    opacity: 0.55,
+    opacity: 0.5,
     depthTest: false,
     side: THREE.DoubleSide,
   });
-  const hoverPatch = new THREE.Mesh(hoverGeom, hoverMat);
-  hoverPatch.visible = false;
-  hoverPatch.renderOrder = 10;
-  scene.add(hoverPatch);
+  const hoverPatches: THREE.Mesh[] = [];
+  for (let i = 0; i < HIGHLIGHT_POOL_SIZE; i++) {
+    const patch = new THREE.Mesh(hoverGeom, hoverMat);
+    patch.visible = false;
+    patch.renderOrder = 10;
+    scene.add(patch);
+    hoverPatches.push(patch);
+  }
 
   const setHover = (zone: CubeZone | null) => {
-    if (!zone) {
-      hoverPatch.visible = false;
-      return;
+    const rects = zone ? highlightRectsForZone(zone) : [];
+    for (let i = 0; i < hoverPatches.length; i++) {
+      const patch = hoverPatches[i]!;
+      const rect = rects[i];
+      if (!rect) {
+        patch.visible = false;
+        continue;
+      }
+      patch.visible = true;
+      const basis = new THREE.Matrix4().makeBasis(
+        axisVector(rect.uAxis),
+        axisVector(rect.vAxis),
+        axisVector(rect.axis, rect.sign),
+      );
+      patch.quaternion.setFromRotationMatrix(basis);
+      patch.scale.set(rect.uMax - rect.uMin, rect.vMax - rect.vMin, 1);
+      const center = new THREE.Vector3();
+      center.setComponent(rect.axis, rect.sign * (CUBE_HALF_EXTENT + HIGHLIGHT_SURFACE_OFFSET));
+      center.setComponent(rect.uAxis, (rect.uMin + rect.uMax) / 2);
+      center.setComponent(rect.vAxis, (rect.vMin + rect.vMax) / 2);
+      patch.position.copy(center);
     }
-    hoverPatch.visible = true;
-    // Patch size scales with zone kind: full face, edge strip, or corner nub.
-    const extent = CUBE_HALF_EXTENT * 2 + 0.02;
-    const faceScale =
-      zone.kind === "face" ? extent : zone.kind === "edge" ? extent * 0.5 : extent * 0.32;
-    hoverPatch.scale.set(faceScale, faceScale, 1);
-    hoverPatch.position.copy(zone.dir).multiplyScalar(CUBE_HALF_EXTENT + 0.01);
-    hoverPatch.lookAt(0, 0, 0);
   };
 
   return {
     scene,
     camera,
     mesh,
-    hoverPatch,
     setHover,
     dispose: () => {
       geometry.dispose();

@@ -5,6 +5,7 @@ import {
   ZONE_THRESHOLD_RATIO,
   axisForTransition,
   classifyHit,
+  highlightRectsForZone,
   makeOrientationInterpolator,
   upForDir,
 } from "./viewCube";
@@ -69,6 +70,69 @@ describe("classifyHit", () => {
       }
     }
     expect(seen.size).toBe(26);
+  });
+});
+
+describe("highlightRectsForZone", () => {
+  it("gives a face zone one centered square patch on its own face", () => {
+    const zone = classifyHit(v(CUBE_HALF_EXTENT, 0, 0))!;
+    const rects = highlightRectsForZone(zone);
+    expect(rects).toHaveLength(1);
+    const r = rects[0]!;
+    expect(r.axis).toBe(0);
+    expect(r.sign).toBe(1);
+    expect(r.uMin).toBeCloseTo(-t);
+    expect(r.uMax).toBeCloseTo(t);
+    expect(r.vMin).toBeCloseTo(-t);
+    expect(r.vMax).toBeCloseTo(t);
+  });
+
+  it("gives an edge zone two strip patches, flush against the shared edge", () => {
+    const zone = classifyHit(v(CUBE_HALF_EXTENT, CUBE_HALF_EXTENT, 0))!;
+    const rects = highlightRectsForZone(zone);
+    expect(rects).toHaveLength(2);
+    const axes = rects.map((r) => r.axis).sort();
+    expect(axes).toEqual([0, 1]);
+    for (const r of rects) {
+      // The axis shared with the other contributing face is an outer band
+      // touching the cube edge (max magnitude == CUBE_HALF_EXTENT); the
+      // non-shared axis is the central band.
+      const sharedAxis = r.axis === 0 ? 1 : 0;
+      const sharedIsU = r.uAxis === sharedAxis;
+      const [sharedMin, sharedMax] = sharedIsU ? [r.uMin, r.uMax] : [r.vMin, r.vMax];
+      const [centralMin, centralMax] = sharedIsU ? [r.vMin, r.vMax] : [r.uMin, r.uMax];
+      expect(Math.max(Math.abs(sharedMin), Math.abs(sharedMax))).toBeCloseTo(CUBE_HALF_EXTENT);
+      expect(centralMin).toBeCloseTo(-t);
+      expect(centralMax).toBeCloseTo(t);
+    }
+  });
+
+  it("gives a corner zone three small square patches, one per adjoining face", () => {
+    const zone = classifyHit(v(CUBE_HALF_EXTENT, CUBE_HALF_EXTENT, CUBE_HALF_EXTENT))!;
+    const rects = highlightRectsForZone(zone);
+    expect(rects).toHaveLength(3);
+    expect(rects.map((r) => r.axis).sort()).toEqual([0, 1, 2]);
+    for (const r of rects) {
+      // Both in-face axes are outer bands touching the cube edge — a small
+      // square right at the corner, not a full face or a full-length strip.
+      expect(Math.max(Math.abs(r.uMin), Math.abs(r.uMax))).toBeCloseTo(CUBE_HALF_EXTENT);
+      expect(Math.max(Math.abs(r.vMin), Math.abs(r.vMax))).toBeCloseTo(CUBE_HALF_EXTENT);
+      expect(r.uMax - r.uMin).toBeCloseTo(CUBE_HALF_EXTENT - t);
+      expect(r.vMax - r.vMin).toBeCloseTo(CUBE_HALF_EXTENT - t);
+    }
+  });
+
+  it("never produces an inverted (min > max) range", () => {
+    for (const p of [
+      v(CUBE_HALF_EXTENT, 0, 0),
+      v(-CUBE_HALF_EXTENT, CUBE_HALF_EXTENT, 0),
+      v(-CUBE_HALF_EXTENT, -CUBE_HALF_EXTENT, -CUBE_HALF_EXTENT),
+    ]) {
+      for (const r of highlightRectsForZone(classifyHit(p)!)) {
+        expect(r.uMin).toBeLessThanOrEqual(r.uMax);
+        expect(r.vMin).toBeLessThanOrEqual(r.vMax);
+      }
+    }
   });
 });
 
