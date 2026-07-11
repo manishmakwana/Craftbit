@@ -32,6 +32,18 @@ export const CUBE_HALF_EXTENT = 0.7;
 /** Fraction of the half-extent beyond which an axis counts as "pulled" toward that face. */
 export const ZONE_THRESHOLD_RATIO = 0.6;
 
+/** Vertical FOV (degrees) of the small camera used to render the cube inset. */
+export const CUBE_CAMERA_FOV_DEG = 30;
+/**
+ * Distance from the cube camera to the cube center. Must clear the cube's
+ * circumscribed sphere (corner-to-center = CUBE_HALF_EXTENT * sqrt(3)) with
+ * margin at CUBE_CAMERA_FOV_DEG, or a corner-on view overflows the frustum
+ * and gets hard-clipped by the inset's scissor rect. At FOV 30 / distance 6
+ * the visible half-height is ~1.61 vs. the cube's ~1.21 corner radius (33%
+ * margin) — distance 3 (the previous value) gave only 0.75, well short.
+ */
+export const CUBE_CAMERA_DISTANCE = 6;
+
 /**
  * Classifies a local-space hit point on the cube into a face/edge/corner
  * zone. Returns null only if the point is at the exact center (degenerate;
@@ -258,7 +270,7 @@ const HIGHLIGHT_SURFACE_OFFSET = 0.006;
 /** Builds the small self-contained scene rendered in the corner inset. */
 export function buildViewCubeScene(colors: CubeColors): ViewCubeScene {
   const scene = new THREE.Scene();
-  const camera = new THREE.PerspectiveCamera(28, 1, 0.1, 20);
+  const camera = new THREE.PerspectiveCamera(CUBE_CAMERA_FOV_DEG, 1, 0.1, 20);
 
   const geometry = new THREE.BoxGeometry(
     CUBE_HALF_EXTENT * 2,

@@ -174,6 +174,10 @@ export function Viewport() {
     const local = toLocal(e);
     if (inCubeRect(local, manager.getViewCubeRect())) {
       cubeDragRef.current = { lastX: local.x, lastY: local.y, totalMove: 0 };
+      // orbitCubeBy positions the camera directly; leaving OrbitControls
+      // enabled would let it independently process the same native pointer
+      // events and apply its own (conflicting) rotation on top.
+      manager.controls.enabled = false;
       (e.target as Element).setPointerCapture(e.pointerId);
       return;
     }
@@ -257,6 +261,7 @@ export function Viewport() {
     const cubeDrag = cubeDragRef.current;
     if (cubeDrag) {
       cubeDragRef.current = null;
+      manager.controls.enabled = true;
       if (cubeDrag.totalMove < CUBE_CLICK_SLOP) {
         const local = toLocal(e);
         const zone = manager.pickViewCubeZone(local.x, local.y);

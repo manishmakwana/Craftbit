@@ -10,6 +10,7 @@ import type { BodyResult, EvaluatedSketch, RegenResult } from "@craftbit/geometr
 import {
   type CubeZone,
   type OrientationFrame,
+  CUBE_CAMERA_DISTANCE,
   buildViewCubeScene,
   classifyHit,
   easeInOutCubic,
@@ -74,6 +75,7 @@ export class SceneManager {
   private defaultTarget: THREE.Vector3;
   private pendingOrientation: PendingOrientation | null = null;
   private dampingBeforeOrientation = true;
+  private controlsEnabledBeforeOrientation = true;
 
   constructor(container: HTMLElement) {
     this.container = container;
@@ -225,7 +227,14 @@ export class SceneManager {
     const interp = makeOrientationInterpolator(fromDir, toDir, fromUp, toUp);
 
     this.dampingBeforeOrientation = this.controls.enableDamping;
+    this.controlsEnabledBeforeOrientation = this.controls.enabled;
     this.controls.enableDamping = false;
+    // OrbitControls listens to the same native pointer events as our own
+    // click/drag handling; left enabled, any residual internal rotation
+    // state (e.g. damped momentum from the gesture that triggered this
+    // animation) keeps nudging the camera on top of our own frame-by-frame
+    // positioning, drifting it unpredictably once damping is re-enabled.
+    this.controls.enabled = false;
     this.pendingOrientation = {
       interp,
       fromTarget,
@@ -243,6 +252,7 @@ export class SceneManager {
     if (!this.pendingOrientation) return;
     this.pendingOrientation = null;
     this.controls.enableDamping = this.dampingBeforeOrientation;
+    this.controls.enabled = this.controlsEnabledBeforeOrientation;
   }
 
   /** Restores the default iso view, refit to whatever bodies currently exist. */
@@ -267,6 +277,7 @@ export class SceneManager {
     if (t >= 1) {
       this.pendingOrientation = null;
       this.controls.enableDamping = this.dampingBeforeOrientation;
+      this.controls.enabled = this.controlsEnabledBeforeOrientation;
       const d = po.finalDir;
       this.container.dataset.viewDir = `${d.x.toFixed(4)},${d.y.toFixed(4)},${d.z.toFixed(4)}`;
     }
@@ -274,9 +285,8 @@ export class SceneManager {
 
   private renderCubeInset(): void {
     if (!this.isViewCubeVisible()) return;
-    const dist = 3;
     const dir = this.camera.position.clone().sub(this.controls.target).normalize();
-    this.viewCube.camera.position.copy(dir.multiplyScalar(dist));
+    this.viewCube.camera.position.copy(dir.multiplyScalar(CUBE_CAMERA_DISTANCE));
     this.viewCube.camera.up.copy(this.camera.up);
     this.viewCube.camera.lookAt(0, 0, 0);
 
