@@ -1,6 +1,6 @@
 # D2: Topological Naming Scheme
 
-Status: **draft — pending Phase-0 binding probe** · Milestone: M2 · Serves: spec §4.3, §6.4, §7.8
+Status: **finalized — Phase-0 probe passed 2026-07-13** (`packages/geometry-worker/test/naming-probe.test.ts`) · Milestone: M2 · Serves: spec §4.3, §6.4, §7.8
 Depends on: D1 (worker RPC — names travel in tessellation payloads), the OCCT history API
 (`BRepBuilderAPI_MakeShape::Generated/Modified/IsDeleted`).
 
@@ -242,7 +242,7 @@ scale (≤ a few thousand faces, spec §8) this is noise next to the boolean its
 | **revolve** (`BRepPrimAPI_MakeRevol`) | builder + seeds | `Generated(profileEdge)` → `side(curveKey)`. Partial revolve: `FirstShape()` → `start`, `LastShape()` → `end`; full 360°: no caps (and refs to `start`/`end` correctly die if angle is edited to 360). Axis-touching profiles produce degenerate/apex cases → orphan path (warning) is acceptable v1. |
 | **fillet** (`BRepFilletAPI_MakeFillet`) | builder | `Generated(edge)` → the fillet face(s) `gen(edgeName)`; multi-face blends at corners get split marks. `Modified(face)` → trimmed neighbors keep lineage via `mod(…)` only if OCCT reports true modification; typically trimming reports Modified 1→1 so names survive as `mod(old)`. |
 | **chamfer** (`BRepFilletAPI_MakeChamfer`) | builder | Identical to fillet. |
-| **shell** (`BRepOffsetAPI_MakeThickSolid`) | builder | `Modified(face)` → offset inner faces. Rim faces (thickness walls at removed-face boundaries) come from `Generated(edgeOfRemovedFace)`. OCCT 7.4 thick-solid history is the weakest of the set — Phase-0 probes it explicitly; orphan fallback covers gaps with `warning`, which is honest (spec prefers loud degradation over invented lineage). |
+| **shell** (`BRepOffsetAPI_MakeThickSolid`) | builder | Rim faces (thickness walls at removed-face boundaries) come from `Generated(edgeOfRemovedFace)` — **confirmed working** by the Phase-0 probe. `Modified(face)` returns nothing in this build (probed: 0 faces for a kept face), so offset inner faces take the orphan path (`new(j)` + `warning`) — loud degradation over invented lineage, per spec. Outer faces untouched by the offset keep their names via the `IsSame` passthrough. |
 | **boolean** (`BRepAlgoAPI_Cut/Fuse/Common`) | builder | Old names from **both** parents feed step 2–5 (tool-body lineage survives into the result — a cavity wall keeps its tool-extrude `side(…)` name). Section edges (`Generated` from a *face*) → `sect(faceA,faceB)` with the two parent face names sorted. Whole-face deletions via `IsDeleted`. The tool body is consumed (removed from `RegenState.bodies`); its names live on only inside the result's lineage strings. |
 | **mirror** (`BRepBuilderAPI_Transform`, copy) | explicit | New-body mirror: every subshape of the copy → `featId/kind/inst(0,srcName)`. Merge mirror: name the copy that way, then fuse under boolean rules. |
 | **linearPattern / circularPattern** | explicit + builder | Instance `k` (k≥1; the original keeps its names) → `featId/kind/inst(k,srcName)`. The subsequent fuse of instances follows boolean rules; seam faces between touching instances resolve through `mod`/split marks. Count changes: existing `inst(k)` names are untouched; grown counts append; shrunk counts retire high-k names (dependents fail loudly — correct). |
@@ -417,14 +417,28 @@ against the real WASM build:
 
 ## 7. Open questions
 
-Per the gate rules these must be empty before implementation starts. All three are
-closed mechanically by the Phase-0 probe (§6.3), which is the first commit of the
-implementation PR chain:
+**None.** The three questions this section carried in draft were closed by the Phase-0
+probe (§6.3, `naming-probe.test.ts`, run against the real opencascade.js 1.1.1 kernel
+on 2026-07-13; all 7 probes green). Findings and their design consequences:
 
-1. Do the WASM bindings expose the history methods with usable signatures
-   (list-by-reference returns)? *(Expected yes — classes are in the build's supported
-   list and the full build binds all public methods; must be proven.)*
-2. How complete is `MakeThickSolid` history in OCCT 7.4? *(Determines whether shell rim
-   faces get `gen(edge)` names or ship as documented orphan-warnings.)*
-3. Does `BRepPrimAPI_MakeRevol` report `FirstShape/LastShape` sanely for partial
-   revolutions in this build? *(Fallback: cap faces via orphan path.)*
+1. **History bindings: yes, fully usable.** `Modified`/`Generated`/`IsDeleted` work on
+   `BRepAlgoAPI_Cut` (1→2 face split reported correctly; tool-face lineage works;
+   whole-face consumption reports `IsDeleted=true`), and
+   `FirstShape`/`LastShape`/`Generated` work on `MakePrism`, `MakeRevol` (90°), and
+   `MakeFillet.Generated`. Returned `TopTools_ListOfShape` instances are drained via
+   `Size()` + `First_1()` + `RemoveFirst()` (destructive drain — the namer must treat
+   history lists as consume-once).
+2. **`MakeThickSolid` history is partial, as §3.4 anticipated:** `Generated(edge)` →
+   rim faces **works** (1 rim shape per removed-face edge); `Modified(keptFace)`
+   returns **0 faces**, so offset inner faces get no lineage. Per §3.4/§4, inner faces
+   ship on the orphan path (`new(j)` + feature `warning`); rim faces get real
+   `gen(edgeName)` names.
+3. **`MakeRevol` caps: usable at 90°** (both caps non-null, `Generated(profileEdge)`
+   works). Caveat: at 360°, `FirstShape()` returns a **non-null** shape rather than a
+   null one — so the extruder-side rule is explicit: **never query/mint `start`/`end`
+   names when angle = 360°**, rather than trusting the kernel to signal caplessness.
+
+Additional confirmed finding: `IsSame` does **not** hold across
+`BRepBuilderAPI_Transform` (0/6 faces), while explorer face order is exactly preserved
+— confirming §3.4's `move` row: the explicit order-index identity mapping is
+*required*, not merely a fallback.
