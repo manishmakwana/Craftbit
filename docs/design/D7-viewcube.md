@@ -1,6 +1,6 @@
 # D7: ViewCube navigation widget
 
-Status: **planned** · Owner: viewport · Depends on: nothing new (pure app-side feature)
+Status: **implemented** · Owner: viewport · Depends on: nothing new (pure app-side feature)
 
 A Fusion 360-style ViewCube in the top-right corner of the viewport: a small,
 always-visible 3D cube whose orientation mirrors the camera. Clicking a face,
