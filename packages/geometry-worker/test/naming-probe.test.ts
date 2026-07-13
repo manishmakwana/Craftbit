@@ -21,12 +21,7 @@
 import { beforeAll, describe, expect, it } from "vitest";
 import { loadOcctForNode } from "./loadOcctNode";
 import { collectFaces, collectUniqueEdges } from "../src/regen";
-import type {
-  OpenCascadeInstance,
-  TopoDsEdge,
-  TopoDsFace,
-  TopoDsShape,
-} from "../src/occt-types";
+import type { OpenCascadeInstance, TopoDsEdge, TopoDsFace, TopoDsShape } from "../src/occt-types";
 
 let oc: OpenCascadeInstance;
 beforeAll(async () => {
