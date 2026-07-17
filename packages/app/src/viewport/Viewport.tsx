@@ -1,9 +1,24 @@
 import { useEffect, useRef, useState } from "react";
 import * as THREE from "three";
-import { newId, type SketchFeature, type SketchProfile } from "@craftbit/core";
+import {
+  evaluateExpression,
+  newId,
+  resolveSketchConstraints,
+  solveSketch,
+  type SketchEntity,
+  type SketchFeature,
+  type SketchProfile,
+} from "@craftbit/core";
 import type { EvaluatedSketch } from "@craftbit/geometry-worker";
-import { CUBE_PAD_PX, CUBE_SIZE_PX, SceneManager, type PickResult } from "./sceneManager";
+import {
+  CUBE_PAD_PX,
+  CUBE_SIZE_PX,
+  SceneManager,
+  entityWorldPoint,
+  type PickResult,
+} from "./sceneManager";
 import { SketchDimensions } from "./SketchDimensions";
+import { pickSketchEntity } from "./sketchPick";
 import { useDocumentStore } from "../stores/documentStore";
 import { useGeometryStore } from "../stores/geometryStore";
 import { useUiStore } from "../stores/uiStore";
@@ -19,6 +34,21 @@ interface DrawState {
   polygonPoints: { x: number; y: number }[];
 }
 
+/** In-progress line-tool chain: last placed point carries forward. */
+interface LineChainState {
+  firstPointId: string;
+  lastPointId: string;
+  cursor: { x: number; y: number } | null;
+}
+
+/** In-progress point drag (Select tool): live-solved locally, committed on release. */
+interface EntityDragState {
+  pointId: string;
+  /** Solved entity state from the latest move (committed on pointer-up). */
+  solved: SketchEntity[] | null;
+  moved: boolean;
+}
+
 interface CubeDragState {
   lastX: number;
   lastY: number;
@@ -29,6 +59,11 @@ export function Viewport() {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const managerRef = useRef<SceneManager | null>(null);
   const drawRef = useRef<DrawState | null>(null);
+  const lineChainRef = useRef<LineChainState | null>(null);
+  const entityDragRef = useRef<EntityDragState | null>(null);
+  /** Set when pointer-down consumed the click on a curve entity, so the
+   * pointer-up profile-pick fallback must not clear that selection. */
+  const entityClickRef = useRef(false);
   const cubeDragRef = useRef<CubeDragState | null>(null);
   const [hover, setHover] = useState<PickResult | null>(null);
   // Manager also held in state so overlays re-render once it exists.
@@ -44,6 +79,7 @@ export function Viewport() {
   const selectedFaces = useUiStore((s) => s.selectedFaces);
   const selectedEdges = useUiStore((s) => s.selectedEdges);
   const selectedProfileId = useUiStore((s) => s.selectedProfileId);
+  const selectedEntityIds = useUiStore((s) => s.selectedEntityIds);
 
   const activeSketch: EvaluatedSketch | undefined = result?.sketches.find(
     (s) => s.featureId === activeSketchId,
@@ -76,8 +112,8 @@ export function Viewport() {
     const sceneManager = managerRef.current;
     if (!sceneManager || !result) return;
     sceneManager.setRegenResult(result, useDocumentStore.getState().doc.bodyColors);
-    sceneManager.setSketches(result.sketches, activeSketchId, selectedProfileId);
-  }, [result, activeSketchId, selectedProfileId]);
+    sceneManager.setSketches(result.sketches, activeSketchId, selectedProfileId, selectedEntityIds);
+  }, [result, activeSketchId, selectedProfileId, selectedEntityIds]);
 
   useEffect(() => {
     managerRef.current?.setHighlights(hover, selectedFaces, selectedEdges);
@@ -128,6 +164,85 @@ export function Viewport() {
     if (!sketch || sketch.type !== "sketch") return;
     const next: SketchFeature = { ...sketch, profiles: [...sketch.profiles, profile] };
     dispatch({ kind: "updateFeature", featureId: sketch.id, next });
+  };
+
+  // --- constraint-sketcher helpers (D3) ------------------------------
+  const activeFeature = (): SketchFeature | null => {
+    const f = useDocumentStore.getState().doc.features.find((x) => x.id === activeSketchId);
+    return f && f.type === "sketch" ? f : null;
+  };
+
+  /** Solved entities if a regen has landed, else the document's stored ones. */
+  const currentEntities = (): SketchEntity[] => {
+    if (activeSketch && activeSketch.entities.length > 0) return activeSketch.entities;
+    return activeFeature()?.entities ?? [];
+  };
+
+  const entityProjector = (x: number, y: number) => {
+    const m = managerRef.current!;
+    return m.projectToScreen(entityWorldPoint(activeSketch!, x, y));
+  };
+
+  const paramEnv = (name: string): number => {
+    const v = result?.parameterValues[name];
+    if (v === undefined) throw new Error(`Unknown parameter "${name}"`);
+    return v;
+  };
+
+  /** Adds a chain click: reuses a picked existing point or creates one, links
+   * a line from the previous chain point, closes the loop when the chain's
+   * first point is clicked again. One document update per click. */
+  const lineToolClick = (local: { x: number; y: number }, screen: { x: number; y: number }) => {
+    const feature = activeFeature();
+    if (!feature) return;
+    const entities = feature.entities ?? [];
+    const solved = currentEntities();
+    const picked = pickSketchEntity(solved, entityProjector, screen.x, screen.y);
+    const snappedId = picked?.kind === "point" ? picked.entityId : null;
+
+    const chain = lineChainRef.current;
+    const nextEntities = [...entities];
+    let targetId = snappedId;
+    if (!targetId) {
+      targetId = newId();
+      nextEntities.push({
+        id: targetId,
+        kind: "point",
+        x: Math.round(local.x * 100) / 100,
+        y: Math.round(local.y * 100) / 100,
+      });
+    }
+
+    if (chain) {
+      if (targetId === chain.lastPointId) return; // double-click same point: ignore
+      nextEntities.push({ id: newId(), kind: "line", p1: chain.lastPointId, p2: targetId });
+      if (targetId === chain.firstPointId) {
+        lineChainRef.current = null; // loop closed
+        managerRef.current?.setPreview(null, false);
+      } else {
+        lineChainRef.current = { ...chain, lastPointId: targetId, cursor: null };
+      }
+    } else {
+      lineChainRef.current = { firstPointId: targetId, lastPointId: targetId, cursor: null };
+    }
+
+    const next: SketchFeature = { ...feature, entities: nextEntities };
+    useDocumentStore.getState().dispatch({ kind: "updateFeature", featureId: feature.id, next });
+  };
+
+  const updateLinePreview = () => {
+    const chainNow = lineChainRef.current;
+    const m = managerRef.current;
+    if (!chainNow || !m || !activeSketch || !chainNow.cursor) return;
+    const last = currentEntities().find((e) => e.id === chainNow.lastPointId);
+    if (!last || last.kind !== "point") return;
+    m.setPreview(
+      [
+        entityWorldPoint(activeSketch, last.x, last.y),
+        entityWorldPoint(activeSketch, chainNow.cursor.x, chainNow.cursor.y),
+      ],
+      false,
+    );
   };
 
   const updatePreview = () => {
@@ -182,7 +297,36 @@ export function Viewport() {
       return;
     }
 
-    if (mode === "sketch" && activeSketch && sketchTool !== "select") {
+    if (mode === "sketch" && activeSketch && sketchTool === "line") {
+      const ndc = toNdc(e);
+      const planePt = manager.pickOnPlane(ndc.x, ndc.y, activeSketch);
+      if (!planePt) return;
+      lineToolClick(planePt, toLocal(e));
+      return;
+    }
+
+    // Select tool: entity picking (points are drag handles; curves select).
+    if (mode === "sketch" && activeSketch && sketchTool === "select") {
+      const screen = toLocal(e);
+      const entities = currentEntities();
+      if (entities.length > 0) {
+        const picked = pickSketchEntity(entities, entityProjector, screen.x, screen.y);
+        if (picked) {
+          useUiStore.getState().selectEntity(picked.entityId, e.shiftKey);
+          if (picked.kind === "point") {
+            entityDragRef.current = { pointId: picked.entityId, solved: null, moved: false };
+            manager.controls.enabled = false;
+            (e.target as Element).setPointerCapture(e.pointerId);
+          } else {
+            entityClickRef.current = true;
+          }
+          return;
+        }
+      }
+      return; // empty click: handled on pointer-up (clears selection / picks profiles)
+    }
+
+    if (mode === "sketch" && activeSketch && sketchTool !== "select" && sketchTool !== "line") {
       const ndc = toNdc(e);
       const local = manager.pickOnPlane(ndc.x, ndc.y, activeSketch);
       if (!local) return;
@@ -237,6 +381,46 @@ export function Viewport() {
     const ndc = toNdc(e);
 
     if (mode === "sketch" && activeSketch) {
+      // Live-solve while dragging a point (Select tool): local preview only;
+      // the document updates once on release.
+      const entityDrag = entityDragRef.current;
+      if (entityDrag && result) {
+        const planePt = manager.pickOnPlane(ndc.x, ndc.y, activeSketch);
+        const feature = activeFeature();
+        if (planePt && feature && feature.entities) {
+          try {
+            const constraints = resolveSketchConstraints(feature.constraints ?? [], (expr) =>
+              evaluateExpression(expr, paramEnv),
+            );
+            const base = entityDrag.solved ?? currentEntities();
+            const solved = solveSketch(base, constraints, {
+              pointId: entityDrag.pointId,
+              x: planePt.x,
+              y: planePt.y,
+            });
+            entityDrag.solved = solved.entities;
+            entityDrag.moved = true;
+            const patched = result.sketches.map((s) =>
+              s.featureId === activeSketchId ? { ...s, entities: solved.entities } : s,
+            );
+            manager.setSketches(patched, activeSketchId, selectedProfileId, selectedEntityIds);
+          } catch {
+            // Parameter errors surface via regen statuses; skip live preview.
+          }
+        }
+        return;
+      }
+
+      // Line tool: rubber-band from the chain's last point to the cursor.
+      if (sketchTool === "line" && lineChainRef.current) {
+        const planePt = manager.pickOnPlane(ndc.x, ndc.y, activeSketch);
+        if (planePt) {
+          lineChainRef.current.cursor = planePt;
+          updateLinePreview();
+        }
+        return;
+      }
+
       const draw = drawRef.current;
       if (draw) {
         const local = manager.pickOnPlane(ndc.x, ndc.y, activeSketch);
@@ -266,6 +450,23 @@ export function Viewport() {
         const local = toLocal(e);
         const zone = manager.pickViewCubeZone(local.x, local.y);
         if (zone) manager.orientTo(zone.dir);
+      }
+      return;
+    }
+
+    // Commit an entity drag: one document update per drag (one undo step).
+    const entityDrag = entityDragRef.current;
+    if (entityDrag) {
+      entityDragRef.current = null;
+      manager.controls.enabled = true;
+      if (entityDrag.moved && entityDrag.solved) {
+        const feature = activeFeature();
+        if (feature) {
+          const next: SketchFeature = { ...feature, entities: entityDrag.solved };
+          useDocumentStore
+            .getState()
+            .dispatch({ kind: "updateFeature", featureId: feature.id, next });
+        }
       }
       return;
     }
@@ -304,11 +505,17 @@ export function Viewport() {
     }
 
     // Select tool in sketch mode: click a profile outline to select it and
-    // reveal its dimension labels for editing.
+    // reveal its dimension labels for editing. Entity clicks were consumed on
+    // pointer-down (flagged via entityClickRef) — don't clear that selection.
     if (mode === "sketch" && sketchTool === "select" && activeSketchId && e.button === 0) {
+      if (entityClickRef.current) {
+        entityClickRef.current = false;
+        return;
+      }
       const ndc = toNdc(e);
       const picked = manager.pickSketchProfile(ndc.x, ndc.y, activeSketchId);
       useUiStore.getState().setSelectedProfile(picked?.profileId ?? null);
+      if (!picked && !e.shiftKey) useUiStore.getState().selectEntity(null);
       return;
     }
 
@@ -357,6 +564,8 @@ export function Viewport() {
   useEffect(() => {
     const cancel = () => {
       drawRef.current = null;
+      lineChainRef.current = null;
+      entityDragRef.current = null;
       if (managerRef.current) {
         managerRef.current.setPreview(null, false);
         managerRef.current.controls.enabled = true;

@@ -5,7 +5,7 @@
 
 import { create } from "zustand";
 
-export type SketchTool = "select" | "rect" | "circle" | "polygon";
+export type SketchTool = "select" | "rect" | "circle" | "polygon" | "line";
 
 export interface FaceSel {
   bodyId: string;
@@ -40,6 +40,8 @@ interface UiState {
   selectedEdges: EdgeSel[];
   selectedFeatureId: string | null;
   selectedProfileId: string | null;
+  /** Constraint-sketcher entity selection (D3), active-sketch scoped. */
+  selectedEntityIds: string[];
   dialog: DialogState;
   toast: { message: string; error: boolean } | null;
   hint: string;
@@ -52,6 +54,7 @@ interface UiState {
   clearSelection(): void;
   setSelectedFeature(id: string | null): void;
   setSelectedProfile(id: string | null): void;
+  selectEntity(id: string | null, additive?: boolean): void;
   openDialog(dialog: DialogState): void;
   showToast(message: string, error?: boolean): void;
   setHint(hint: string): void;
@@ -67,6 +70,7 @@ export const useUiStore = create<UiState>((set) => ({
   selectedEdges: [],
   selectedFeatureId: null,
   selectedProfileId: null,
+  selectedEntityIds: [],
   dialog: null,
   toast: null,
   hint: "Create a sketch to start",
@@ -75,12 +79,13 @@ export const useUiStore = create<UiState>((set) => ({
     set({
       mode: "sketch",
       activeSketchId: sketchId,
-      sketchTool: "rect",
+      sketchTool: "line",
       dialog: null,
       selectedFaces: [],
       selectedEdges: [],
       selectedProfileId: null,
-      hint: "Drag to draw a rectangle · Esc to cancel tool",
+      selectedEntityIds: [],
+      hint: "Click to draw connected lines · click the first point to close · Esc to end",
     });
   },
 
@@ -89,18 +94,21 @@ export const useUiStore = create<UiState>((set) => ({
       mode: "model",
       activeSketchId: null,
       selectedProfileId: null,
+      selectedEntityIds: [],
       hint: "Select faces or edges, or create a feature",
     });
   },
 
   setSketchTool(tool) {
     const hints: Record<SketchTool, string> = {
-      select: "Click a profile to edit its dimensions",
+      select:
+        "Click lines/points to select (Shift adds) · drag points to move · apply constraints from the toolbar",
       rect: "Drag to draw a rectangle",
       circle: "Drag from center to draw a circle",
       polygon: "Click to add points · double-click to close",
+      line: "Click to draw connected lines · click the first point to close · Esc to end",
     };
-    set({ sketchTool: tool, hint: hints[tool] });
+    set({ sketchTool: tool, hint: hints[tool], selectedEntityIds: [] });
   },
 
   selectFace(sel, additive = false) {
@@ -142,7 +150,13 @@ export const useUiStore = create<UiState>((set) => ({
   },
 
   clearSelection() {
-    set({ selectedFaces: [], selectedEdges: [], selectedFeatureId: null, selectedProfileId: null });
+    set({
+      selectedFaces: [],
+      selectedEdges: [],
+      selectedFeatureId: null,
+      selectedProfileId: null,
+      selectedEntityIds: [],
+    });
   },
 
   setSelectedFeature(id) {
@@ -151,6 +165,20 @@ export const useUiStore = create<UiState>((set) => ({
 
   setSelectedProfile(id) {
     set({ selectedProfileId: id });
+  },
+
+  selectEntity(id, additive = false) {
+    set((s) => {
+      if (!id) return { selectedEntityIds: [] };
+      if (additive) {
+        return {
+          selectedEntityIds: s.selectedEntityIds.includes(id)
+            ? s.selectedEntityIds.filter((e) => e !== id)
+            : [...s.selectedEntityIds, id],
+        };
+      }
+      return { selectedEntityIds: [id], selectedProfileId: null };
+    });
   },
 
   openDialog(dialog) {

@@ -1,6 +1,11 @@
 import { useState } from "react";
-import { sketchToDxf, sketchToSvg } from "@craftbit/core";
-import type { StlValidation } from "@craftbit/geometry-worker";
+import {
+  sampleLoopPolygon,
+  sketchToDxf,
+  sketchToSvg,
+  type Evaluated2dProfile,
+} from "@craftbit/core";
+import type { EvaluatedProfile, StlValidation } from "@craftbit/geometry-worker";
 import { useDocumentStore } from "../../stores/documentStore";
 import { useGeometryStore } from "../../stores/geometryStore";
 import { useUiStore } from "../../stores/uiStore";
@@ -117,15 +122,27 @@ export function ExportDialog() {
         {sketches.map((s) => {
           const feature = doc.features.find((f) => f.id === s.featureId);
           const name = feature?.name ?? "Sketch";
+          // 2D fabrication export flattens constraint-sketcher loops to
+          // fine polylines (arcs sampled at 64 chords — well under laser
+          // kerf at hobby scales).
+          const profiles2d: Evaluated2dProfile[] = s.profiles.map((p: EvaluatedProfile) =>
+            p.kind === "loop"
+              ? {
+                  id: p.id,
+                  kind: "polygon" as const,
+                  points: sampleLoopPolygon({ id: p.id, segments: p.segments }, 64),
+                }
+              : p,
+          );
           return (
             <div key={s.featureId} style={{ display: "flex", gap: 6, marginBottom: 6 }}>
               <span style={{ flex: 1, alignSelf: "center" }}>{name}</span>
               <button
                 className="btn"
                 data-testid="export-svg"
-                disabled={s.profiles.length === 0}
+                disabled={profiles2d.length === 0}
                 onClick={() => {
-                  downloadFile(`${baseName}-${name}.svg`, sketchToSvg(s.profiles), "image/svg+xml");
+                  downloadFile(`${baseName}-${name}.svg`, sketchToSvg(profiles2d), "image/svg+xml");
                   showToast("SVG exported at exact 1:1 mm scale");
                 }}
               >
@@ -134,11 +151,11 @@ export function ExportDialog() {
               <button
                 className="btn"
                 data-testid="export-dxf"
-                disabled={s.profiles.length === 0}
+                disabled={profiles2d.length === 0}
                 onClick={() => {
                   downloadFile(
                     `${baseName}-${name}.dxf`,
-                    sketchToDxf(s.profiles),
+                    sketchToDxf(profiles2d),
                     "application/dxf",
                   );
                   showToast("DXF (R12, mm) exported");

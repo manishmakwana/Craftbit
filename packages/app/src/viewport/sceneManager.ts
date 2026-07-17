@@ -6,6 +6,7 @@
 
 import * as THREE from "three";
 import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+import type { SketchEntity } from "@craftbit/core";
 import type { BodyResult, EvaluatedSketch, RegenResult } from "@craftbit/geometry-worker";
 import {
   type CubeZone,
@@ -404,11 +405,15 @@ export class SceneManager {
     sketches: EvaluatedSketch[],
     activeSketchId: string | null,
     selectedProfileId: string | null = null,
+    selectedEntityIds: readonly string[] = [],
   ): void {
     this.sketchGroup.clear();
     for (const sketch of sketches) {
       const isActive = sketch.featureId === activeSketchId;
       for (const profile of sketch.profiles) {
+        // Loop profiles duplicate their member entities' geometry — entities
+        // are drawn individually below, so skip the aggregate outline.
+        if (profile.kind === "loop") continue;
         const isSelected = isActive && profile.id === selectedProfileId;
         const color = new THREE.Color(
           css(isSelected ? "--vp-selected" : isActive ? "--vp-sketch" : "--vp-sketch-dim"),
@@ -419,6 +424,110 @@ export class SceneManager {
         const line = new THREE.LineLoop(geom, material);
         line.userData = { sketchId: sketch.featureId, profileId: profile.id };
         this.sketchGroup.add(line);
+      }
+      this.addSketchEntities(sketch, isActive, selectedEntityIds);
+    }
+  }
+
+  /** Draws constraint-sketcher entities: lines/circles/arcs as curves, points as handles. */
+  private addSketchEntities(
+    sketch: EvaluatedSketch,
+    isActive: boolean,
+    selectedEntityIds: readonly string[],
+  ): void {
+    if (sketch.entities.length === 0) return;
+    const points = new Map(
+      sketch.entities
+        .filter((e): e is Extract<SketchEntity, { kind: "point" }> => e.kind === "point")
+        .map((e) => [e.id, e]),
+    );
+    const at = (x: number, y: number) => entityWorldPoint(sketch, x, y);
+    const colorFor = (id: string) =>
+      new THREE.Color(
+        css(
+          isActive && selectedEntityIds.includes(id)
+            ? "--vp-selected"
+            : isActive
+              ? "--vp-sketch"
+              : "--vp-sketch-dim",
+        ),
+      );
+
+    for (const e of sketch.entities) {
+      if (e.kind === "line") {
+        const p1 = points.get(e.p1);
+        const p2 = points.get(e.p2);
+        if (!p1 || !p2) continue;
+        const geom = new THREE.BufferGeometry().setFromPoints([at(p1.x, p1.y), at(p2.x, p2.y)]);
+        const line = new THREE.Line(geom, new THREE.LineBasicMaterial({ color: colorFor(e.id) }));
+        line.userData = { sketchId: sketch.featureId, entityId: e.id };
+        this.sketchGroup.add(line);
+      } else if (e.kind === "circle") {
+        const c = points.get(e.center);
+        if (!c) continue;
+        const pts: THREE.Vector3[] = [];
+        for (let i = 0; i < 64; i++) {
+          const a = (i / 64) * Math.PI * 2;
+          pts.push(at(c.x + Math.cos(a) * e.radius, c.y + Math.sin(a) * e.radius));
+        }
+        const geom = new THREE.BufferGeometry().setFromPoints(pts);
+        const loop = new THREE.LineLoop(
+          geom,
+          new THREE.LineBasicMaterial({ color: colorFor(e.id) }),
+        );
+        loop.userData = { sketchId: sketch.featureId, entityId: e.id };
+        this.sketchGroup.add(loop);
+      } else if (e.kind === "arc") {
+        const c = points.get(e.center);
+        const s = points.get(e.start);
+        const en = points.get(e.end);
+        if (!c || !s || !en) continue;
+        const r = Math.hypot(s.x - c.x, s.y - c.y);
+        const a0 = Math.atan2(s.y - c.y, s.x - c.x);
+        let a1 = Math.atan2(en.y - c.y, en.x - c.x);
+        if (e.ccw && a1 <= a0) a1 += 2 * Math.PI;
+        if (!e.ccw && a1 >= a0) a1 -= 2 * Math.PI;
+        const pts: THREE.Vector3[] = [];
+        const steps = 48;
+        for (let i = 0; i <= steps; i++) {
+          const a = a0 + ((a1 - a0) * i) / steps;
+          pts.push(at(c.x + Math.cos(a) * r, c.y + Math.sin(a) * r));
+        }
+        const geom = new THREE.BufferGeometry().setFromPoints(pts);
+        const arc = new THREE.Line(geom, new THREE.LineBasicMaterial({ color: colorFor(e.id) }));
+        arc.userData = { sketchId: sketch.featureId, entityId: e.id };
+        this.sketchGroup.add(arc);
+      }
+    }
+
+    // Point handles: screen-size squares, drawn on top of curves. Only shown
+    // for the active sketch (handles on inactive sketches would be noise).
+    if (isActive) {
+      const positions: number[] = [];
+      const colors: number[] = [];
+      const normal = new THREE.Color(css("--vp-sketch-point"));
+      const selected = new THREE.Color(css("--vp-selected"));
+      for (const e of sketch.entities) {
+        if (e.kind !== "point") continue;
+        const w = at(e.x, e.y);
+        positions.push(w.x, w.y, w.z);
+        const c = selectedEntityIds.includes(e.id) ? selected : normal;
+        colors.push(c.r, c.g, c.b);
+      }
+      if (positions.length > 0) {
+        const geom = new THREE.BufferGeometry();
+        geom.setAttribute("position", new THREE.BufferAttribute(new Float32Array(positions), 3));
+        geom.setAttribute("color", new THREE.BufferAttribute(new Float32Array(colors), 3));
+        const mat = new THREE.PointsMaterial({
+          size: 7,
+          sizeAttenuation: false,
+          vertexColors: true,
+          depthTest: false,
+        });
+        const cloud = new THREE.Points(geom, mat);
+        cloud.renderOrder = 5;
+        cloud.userData = { sketchId: sketch.featureId, isPointCloud: true };
+        this.sketchGroup.add(cloud);
       }
     }
   }
@@ -639,5 +748,20 @@ export function profilePoints3d(
     }
     return pts;
   }
+  if (profile.kind === "loop") {
+    // Loops are rendered per-entity in setSketches; this path is only a
+    // fallback (e.g. selection outline) — sample coarse segment endpoints.
+    return profile.segments.map((s) => at(s.a.x, s.a.y));
+  }
   return profile.points.map((p) => at(p.x, p.y));
+}
+
+/** Maps a sketch-local 2D point to world coordinates via the sketch's plane frame. */
+export function entityWorldPoint(sketch: EvaluatedSketch, x: number, y: number): THREE.Vector3 {
+  const { origin, xdir, ydir } = sketch.plane;
+  return new THREE.Vector3(
+    origin[0] + xdir[0] * x + ydir[0] * y,
+    origin[1] + xdir[1] * x + ydir[1] * y,
+    origin[2] + xdir[2] * x + ydir[2] * y,
+  );
 }

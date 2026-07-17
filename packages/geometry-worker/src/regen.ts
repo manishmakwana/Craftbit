@@ -16,8 +16,13 @@
 
 import {
   ExprError,
+  arcMidpoint,
   evaluateExpression,
   evaluateParameters,
+  extractLoops,
+  resolveSketchConstraints,
+  sampleLoopPolygon,
+  solveSketch,
   type BooleanFeature,
   type ChamferFeature,
   type CircularPatternFeature,
@@ -28,11 +33,13 @@ import {
   type FilletFeature,
   type ImportStepFeature,
   type LinearPatternFeature,
+  type LoopSegment,
   type MirrorFeature,
   type MoveFeature,
   type PlaneRef,
   type RevolveFeature,
   type ShellFeature,
+  type SketchEntity,
   type SketchFeature,
   type SketchProfile,
 } from "@craftbit/core";
@@ -61,12 +68,24 @@ export interface ResolvedPlane {
 export type EvaluatedProfile =
   | { id: string; kind: "rect"; x: number; y: number; width: number; height: number }
   | { id: string; kind: "circle"; cx: number; cy: number; radius: number }
-  | { id: string; kind: "polygon"; points: { x: number; y: number }[] };
+  | { id: string; kind: "polygon"; points: { x: number; y: number }[] }
+  /** Closed loop from constraint-sketcher entities (D3): true lines/arcs. */
+  | { id: string; kind: "loop"; segments: LoopSegment[] };
+
+export interface SketchSolveInfo {
+  converged: boolean;
+  /** Remaining degrees of freedom; 0 = fully constrained. */
+  dof: number;
+}
 
 export interface EvaluatedSketch {
   featureId: string;
   plane: ResolvedPlane;
   profiles: EvaluatedProfile[];
+  /** Solved constraint-sketcher entities (D3); empty for profile-only sketches. */
+  entities: SketchEntity[];
+  /** Solver diagnostics; null when the sketch has no entities. */
+  solve: SketchSolveInfo | null;
 }
 
 export interface RegenBody {
@@ -268,10 +287,62 @@ function executeSketch(
 ): void {
   const plane = resolvePlane(oc, feature.plane, state);
   const profiles = feature.profiles.map((p) => evaluateProfile(p, env));
-  state.sketches.push({ featureId: feature.id, plane, profiles });
+
+  // Constraint-sketcher entities (D3): re-solve at every regeneration so
+  // dimension expressions drive the geometry; stored coordinates are only
+  // the initial guess. Closed line/arc loops and standalone circles become
+  // profiles alongside the legacy ones.
+  let entities: SketchEntity[] = [];
+  let solve: SketchSolveInfo | null = null;
+  if (feature.entities && feature.entities.length > 0) {
+    const constraints = resolveSketchConstraints(feature.constraints ?? [], (expr) =>
+      evaluateExpression(expr, env),
+    );
+    const result = solveSketch(feature.entities, constraints);
+    entities = result.entities;
+    solve = { converged: result.converged, dof: result.dof };
+    if (!result.converged) {
+      state.sketches.push({ featureId: feature.id, plane, profiles, entities, solve });
+      throw new Error("Sketch constraints did not converge (conflicting or over-constrained)");
+    }
+    const pointById = new Map(
+      entities.filter((e) => e.kind === "point").map((e) => [e.id, e as { x: number; y: number }]),
+    );
+    for (const e of entities) {
+      if (e.kind === "circle") {
+        const c = pointById.get(e.center);
+        if (c && e.radius > 1e-9) {
+          profiles.push({ id: e.id, kind: "circle", cx: c.x, cy: c.y, radius: e.radius });
+        }
+      }
+    }
+    for (const loop of extractLoops(entities, constraints)) {
+      profiles.push({ id: loop.id, kind: "loop", segments: loop.segments });
+    }
+  }
+
+  state.sketches.push({ featureId: feature.id, plane, profiles, entities, solve });
 }
 
 // ---------------------------------------------------------------- extrude
+
+function pointInPolygon(pts: { x: number; y: number }[], x: number, y: number): boolean {
+  let inside = false;
+  for (let i = 0, j = pts.length - 1; i < pts.length; j = i++) {
+    const a = pts[i]!;
+    const b = pts[j]!;
+    if (a.y > y !== b.y > y && x < ((b.x - a.x) * (y - a.y)) / (b.y - a.y) + a.x) {
+      inside = !inside;
+    }
+  }
+  return inside;
+}
+
+/** Loop profiles use a sampled polygon (true arcs → chords) for the 2D
+ * area/containment tests only; wire building keeps exact arcs. */
+function loopPolygon(p: Extract<EvaluatedProfile, { kind: "loop" }>): { x: number; y: number }[] {
+  return sampleLoopPolygon({ id: p.id, segments: p.segments });
+}
 
 /** 2D point-in-profile test used for hole nesting. */
 function profileContains(p: EvaluatedProfile, x: number, y: number): boolean {
@@ -280,19 +351,22 @@ function profileContains(p: EvaluatedProfile, x: number, y: number): boolean {
       return x > p.x && x < p.x + p.width && y > p.y && y < p.y + p.height;
     case "circle":
       return (x - p.cx) ** 2 + (y - p.cy) ** 2 < p.radius ** 2;
-    case "polygon": {
-      let inside = false;
-      const pts = p.points;
-      for (let i = 0, j = pts.length - 1; i < pts.length; j = i++) {
-        const a = pts[i]!;
-        const b = pts[j]!;
-        if (a.y > y !== b.y > y && x < ((b.x - a.x) * (y - a.y)) / (b.y - a.y) + a.x) {
-          inside = !inside;
-        }
-      }
-      return inside;
-    }
+    case "polygon":
+      return pointInPolygon(p.points, x, y);
+    case "loop":
+      return pointInPolygon(loopPolygon(p), x, y);
   }
+}
+
+function polygonCentroid(points: { x: number; y: number }[]): { x: number; y: number } {
+  // Centroid works for convex-ish shapes; adequate here.
+  let sx = 0;
+  let sy = 0;
+  for (const pt of points) {
+    sx += pt.x;
+    sy += pt.y;
+  }
+  return { x: sx / points.length, y: sy / points.length };
 }
 
 function profileInnerPoint(p: EvaluatedProfile): { x: number; y: number } {
@@ -301,16 +375,10 @@ function profileInnerPoint(p: EvaluatedProfile): { x: number; y: number } {
       return { x: p.x + p.width / 2, y: p.y + p.height / 2 };
     case "circle":
       return { x: p.cx, y: p.cy };
-    case "polygon": {
-      // Centroid works for convex-ish freehand shapes; adequate here.
-      let sx = 0;
-      let sy = 0;
-      for (const pt of p.points) {
-        sx += pt.x;
-        sy += pt.y;
-      }
-      return { x: sx / p.points.length, y: sy / p.points.length };
-    }
+    case "polygon":
+      return polygonCentroid(p.points);
+    case "loop":
+      return polygonCentroid(loopPolygon(p));
   }
 }
 
@@ -339,6 +407,35 @@ function planeMapper(oc: OpenCascadeInstance, plane: ResolvedPlane): PlaneMapper
   };
 }
 
+/** Wire from a constraint-sketcher loop: exact line and arc edges. Arcs use
+ * the 3-point form (start, on-arc midpoint, end) — probe-verified to produce
+ * exact areas/volumes (see docs/design/D3-constraint-sketcher.md §5). */
+function loopWire(oc: OpenCascadeInstance, segments: LoopSegment[], map: PlaneMapper): TopoDsWire {
+  const maker = new oc.BRepBuilderAPI_MakeWire_1();
+  for (const seg of segments) {
+    if (Math.hypot(seg.b.x - seg.a.x, seg.b.y - seg.a.y) < 1e-9) continue;
+    if (seg.kind === "line") {
+      maker.Add_1(
+        new oc.BRepBuilderAPI_MakeEdge_3(
+          map.point(seg.a.x, seg.a.y),
+          map.point(seg.b.x, seg.b.y),
+        ).Edge(),
+      );
+    } else {
+      const mid = arcMidpoint(seg);
+      const mk = new oc.GC_MakeArcOfCircle_4(
+        map.point(seg.a.x, seg.a.y),
+        map.point(mid.x, mid.y),
+        map.point(seg.b.x, seg.b.y),
+      );
+      if (!mk.IsDone()) throw new Error("Arc construction failed");
+      const curveHandle = new oc.Handle_Geom_Curve_2(mk.Value().get());
+      maker.Add_1(new oc.BRepBuilderAPI_MakeEdge_24(curveHandle).Edge());
+    }
+  }
+  return maker.Wire();
+}
+
 function profileWire(
   oc: OpenCascadeInstance,
   profile: EvaluatedProfile,
@@ -348,6 +445,17 @@ function profileWire(
     const ax = new oc.gp_Ax2_2(map.point(profile.cx, profile.cy), map.normalDir(), map.xDir());
     const edge = new oc.BRepBuilderAPI_MakeEdge_8(new oc.gp_Circ_2(ax, profile.radius)).Edge();
     return new oc.BRepBuilderAPI_MakeWire_2(edge).Wire();
+  }
+  if (profile.kind === "loop") {
+    // Ensure CCW traversal so faces orient consistently with the other kinds.
+    const ccw = signedArea(loopPolygon(profile)) >= 0;
+    const segments = ccw
+      ? profile.segments
+      : [...profile.segments].reverse().map((s) => {
+          if (s.kind === "line") return { kind: "line" as const, a: s.b, b: s.a };
+          return { ...s, a: s.b, b: s.a, ccw: !s.ccw };
+        });
+    return loopWire(oc, segments, map);
   }
   let pts2d: { x: number; y: number }[];
   if (profile.kind === "rect") {
@@ -379,6 +487,8 @@ function profileArea(p: EvaluatedProfile): number {
       return Math.PI * p.radius ** 2;
     case "polygon":
       return Math.abs(signedArea(p.points));
+    case "loop":
+      return Math.abs(signedArea(loopPolygon(p)));
   }
 }
 
