@@ -15,6 +15,7 @@ const ICONS: Record<Feature["type"], string> = {
   circularPattern: "⊚",
   boolean: "⊛",
   move: "✥",
+  joint: "⚯",
   importStep: "⇪",
 };
 

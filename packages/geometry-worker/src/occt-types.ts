@@ -31,8 +31,16 @@ export interface GpAx2 {
   readonly __gpAx2Brand: never;
 }
 
+/** Right- (or left-)handed coordinate system; joints probe-verified the
+ * point/z/x constructor and SetDisplacement semantics (dbg probe, D6 doc §3). */
+export interface GpAx3 {
+  readonly __gpAx3Brand: never;
+}
+
 export interface GpCirc {
-  readonly __gpCircBrand: never;
+  Location(): GpPnt;
+  Axis(): { Direction(): GpDir };
+  Radius(): number;
 }
 
 export interface GeomCurve {
@@ -57,6 +65,9 @@ export interface GpTrsf {
   SetTranslation_1(vec: GpVec): void;
   SetRotation_1(axis: GpAx1, angleRad: number): void;
   SetMirror_3(plane: GpAx2): void;
+  /** Rigid motion carrying geometry from frame `from` onto frame `to`
+   * (probe-verified: (0,0,1) in a world frame lands at to.origin + to.z). */
+  SetDisplacement(from: GpAx3, to: GpAx3): void;
 }
 
 export interface TopLocLocation {
@@ -170,6 +181,9 @@ export interface BRepAdaptorCurve {
   FirstParameter(): number;
   LastParameter(): number;
   Value(u: number): GpPnt;
+  GetType(): { value: number };
+  /** Only valid when GetType() is GeomAbs_Circle (probe-verified). */
+  Circle(): GpCirc;
 }
 
 export interface BRepAdaptorSurface {
@@ -197,6 +211,9 @@ export interface OpenCascadeInstance {
   gp_Ax1_2: new (p: GpPnt, d: GpDir) => GpAx1;
   gp_Ax2_2: new (p: GpPnt, n: GpDir, vx: GpDir) => GpAx2;
   gp_Ax2_3: new (p: GpPnt, n: GpDir) => GpAx2;
+  /** Frame from origin + main (z) direction + x direction; re-orthonormalizes
+   * x and derives y right-handed. */
+  gp_Ax3_3: new (p: GpPnt, n: GpDir, vx: GpDir) => GpAx3;
   gp_Circ_2: new (ax2: GpAx2, radius: number) => GpCirc;
 
   // Topology builders
@@ -325,6 +342,7 @@ export interface OpenCascadeInstance {
   BRepAdaptor_Curve_2: new (edge: TopoDsEdge) => BRepAdaptorCurve;
   BRepAdaptor_Surface_2: new (face: TopoDsFace, restriction: boolean) => BRepAdaptorSurface;
   GeomAbs_SurfaceType: { GeomAbs_Plane: { value: number } };
+  GeomAbs_CurveType: { GeomAbs_Circle: { value: number } };
   GCPnts_TangentialDeflection_2: new (
     curve: BRepAdaptorCurve,
     angularDeflection: number,

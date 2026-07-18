@@ -237,6 +237,39 @@ export interface MoveFeature {
   rotAngle: Expr;
 }
 
+/**
+ * Assembly joint (spec §7.10, design gate D6): closed-form placement of one
+ * body onto another via mate frames derived from a planar face or circular
+ * edge on each side. Static positioning in v1; the type + limits determine
+ * the drag DOFs when the M7 assembly UI ships.
+ */
+export interface JointRef {
+  bodyId: string;
+  kind: "face" | "edge";
+  /** D2 lineage-encoded topological name (same rules as TopoRef). */
+  name: string;
+}
+
+export interface JointFeature {
+  id: string;
+  type: "joint";
+  name: string;
+  suppressed: boolean;
+  jointType: "rigid" | "revolute" | "slider" | "cylindrical";
+  /** The body that moves into place. */
+  movingRef: JointRef;
+  /** The stationary side; its body is not moved by this joint. */
+  targetRef: JointRef;
+  /** Offset along the joint z axis (mm expression). */
+  offset: Expr;
+  /** Rotation about the joint z axis (degrees expression). */
+  angle: Expr;
+  /** Align moving z with target z instead of the default anti-aligned mate. */
+  flip: boolean;
+  /** Motion limits for the drag solve; placement itself is exact. */
+  limits?: { minOffset?: Expr; maxOffset?: Expr; minAngle?: Expr; maxAngle?: Expr };
+}
+
 /** Imported STEP solid, file bytes embedded in the document (base64). */
 export interface ImportStepFeature {
   id: string;
@@ -259,6 +292,7 @@ export type Feature =
   | CircularPatternFeature
   | BooleanFeature
   | MoveFeature
+  | JointFeature
   | ImportStepFeature;
 
 export const FEATURE_TYPES: readonly Feature["type"][] = [
@@ -273,6 +307,7 @@ export const FEATURE_TYPES: readonly Feature["type"][] = [
   "circularPattern",
   "boolean",
   "move",
+  "joint",
   "importStep",
 ] as const;
 

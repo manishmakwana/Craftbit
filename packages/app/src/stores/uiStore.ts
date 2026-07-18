@@ -27,6 +27,7 @@ export type DialogState =
   | { kind: "circularPattern"; featureId?: string }
   | { kind: "boolean"; featureId?: string }
   | { kind: "move"; featureId?: string }
+  | { kind: "joint"; featureId?: string }
   | { kind: "parameters" }
   | { kind: "export" }
   | { kind: "planeChooser" }

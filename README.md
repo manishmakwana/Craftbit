@@ -9,7 +9,7 @@ Full product & engineering spec: [`docs/SPEC.md`](docs/SPEC.md).
 
 **Working parametric CAD covering the v1 goal: model → assemble → fabricate.**
 Everything below runs in the browser, verified end to end by automated browser tests
-and 95 unit/kernel-regression tests (many asserting exact closed-form volumes
+and 102 unit/kernel-regression tests (many asserting exact closed-form volumes
 against the real OCCT kernel):
 
 - **Sketch** on origin planes or picked planar faces — a real **constraint
@@ -24,8 +24,13 @@ against the real OCCT kernel):
   chamfer, shell, mirror, linear & circular patterns, boolean combine
   (join/cut/intersect).
 - **Assemble**: multiple bodies per document, move/rotate positioning with
-  expression-driven offsets, mirror-to-new-body, per-body colors, STEP **import**
-  (embedded in the document, fully parametric downstream).
+  expression-driven offsets, and **joints** (design gate D6):
+  rigid/revolute/slider/cylindrical mates that snap one body onto another via
+  picked planar faces or circular edges, with expression-driven offset/angle
+  and flip — closed-form placement re-solved every regeneration, so jointed
+  assemblies stay together through upstream edits. Plus mirror-to-new-body,
+  per-body colors, STEP **import** (embedded in the document, fully
+  parametric downstream).
 - **Fabricate**: validated watertight binary STL (edge-manifold check + bounds
   report), STEP AP203/214, exact-1:1-scale SVG and DXF R12 from any sketch.
 - **Never lose work**: feature timeline with edit/delete and per-feature error
@@ -43,8 +48,10 @@ Known deltas from the full spec (deliberate, tracked):
   with a PlaneGCS-compatible constraint model, not PlaneGCS itself (decision +
   swap path in `docs/design/D3-constraint-sketcher.md`). Arcs are supported by the
   solver/kernel; the dedicated arc drawing tool is still to come.
-- Assembly is positioning-based (move/rotate features), not the joint solver of §7.10
-  (design gate D6); STL/DXF/SVG import (§7.12) not yet implemented (STEP import works).
+- Joints are static placement features (design gate D6): the drag-in-viewport
+  kinematics, snap markers, and components of §7.10 ship with the M7 assembly
+  UI (design in `docs/design/D6-joints.md`). STL/DXF/SVG import (§7.12) not
+  yet implemented (STEP import works).
 - Kernel is the prebuilt OCCT 7.4 full build (~14 MB gzipped), not the custom minimal
   build of §4.2.
 

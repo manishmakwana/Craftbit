@@ -32,6 +32,8 @@ import {
   type Feature,
   type FilletFeature,
   type ImportStepFeature,
+  type JointFeature,
+  type JointRef,
   type LinearPatternFeature,
   type LoopSegment,
   type MirrorFeature,
@@ -62,6 +64,7 @@ import {
   nameFromHistory,
   namedInputs,
   resolveName,
+  shapeCentroid,
   type NamedShape,
   type NamingReport,
   type TopoNames,
@@ -255,6 +258,9 @@ function executeFeature(
       break;
     case "move":
       executeMove(oc, feature, state, env);
+      break;
+    case "joint":
+      executeJoint(oc, feature, state, env);
       break;
     case "importStep":
       executeImportStep(oc, feature, state);
@@ -1404,6 +1410,147 @@ function executeMove(
   // Transforms relocate without topology change: every name carries over
   // verbatim by explorer order (probe: order preserved, IsSame is not).
   body.volume = shapeVolume(oc, body.shape);
+}
+
+// ---------------------------------------------------------------- joint (D6)
+
+type V3 = [number, number, number];
+
+/** Deterministic unit perpendicular to z: project the world axis least
+ * aligned with z (doc §2 — same rule every regen, so frames reproduce). */
+function perpendicularOf(z: V3): V3 {
+  const axes: V3[] = [
+    [1, 0, 0],
+    [0, 1, 0],
+    [0, 0, 1],
+  ];
+  let best = axes[0]!;
+  let bestDot = Infinity;
+  for (const a of axes) {
+    const d = Math.abs(a[0] * z[0] + a[1] * z[1] + a[2] * z[2]);
+    if (d < bestDot) {
+      bestDot = d;
+      best = a;
+    }
+  }
+  const dot = best[0] * z[0] + best[1] * z[1] + best[2] * z[2];
+  const p: V3 = [best[0] - dot * z[0], best[1] - dot * z[1], best[2] - dot * z[2]];
+  const len = Math.hypot(p[0], p[1], p[2]);
+  return [p[0] / len, p[1] / len, p[2] / len];
+}
+
+/** Rodrigues rotation of v about unit axis k by angle (radians). */
+function rotateAbout(v: V3, k: V3, angle: number): V3 {
+  const c = Math.cos(angle);
+  const s = Math.sin(angle);
+  const dot = k[0] * v[0] + k[1] * v[1] + k[2] * v[2];
+  const cross: V3 = [
+    k[1] * v[2] - k[2] * v[1],
+    k[2] * v[0] - k[0] * v[2],
+    k[0] * v[1] - k[1] * v[0],
+  ];
+  return [
+    v[0] * c + cross[0] * s + k[0] * dot * (1 - c),
+    v[1] * c + cross[1] * s + k[1] * dot * (1 - c),
+    v[2] * c + cross[2] * s + k[2] * dot * (1 - c),
+  ];
+}
+
+interface JointFrame {
+  origin: V3;
+  z: V3;
+  x: V3;
+}
+
+/** Derives the mate frame from a picked planar face (centroid/normal/x) or
+ * circular edge (center/axis/deterministic perpendicular) — doc §2. */
+function jointFrame(
+  oc: OpenCascadeInstance,
+  state: RegenState,
+  body: RegenBody,
+  ref: JointRef,
+): JointFrame {
+  if (ref.kind === "face") {
+    const faces = collectFaces(oc, body.shape);
+    const index = resolveTopoRef(state, body, ref as AnyRef, "face", (name) =>
+      upgradeRef(ref as AnyRef, name),
+    );
+    const face = faces[index]!;
+    const surf = new oc.BRepAdaptor_Surface_2(face, true);
+    if (surf.GetType().value !== oc.GeomAbs_SurfaceType.GeomAbs_Plane.value) {
+      throw new Error("Joint: pick a planar face or circular edge");
+    }
+    const pln = surf.Plane();
+    let n = pln.Axis().Direction();
+    if (face.Orientation_1().value === oc.TopAbs_Orientation.TopAbs_REVERSED.value) {
+      n = n.Reversed();
+    }
+    const xd = pln.Position().XDirection();
+    return {
+      // Centroid, not gp_Pln.Location() — the latter is an arbitrary point
+      // of the infinite plane.
+      origin: shapeCentroid(oc, face, "face"),
+      z: [n.X(), n.Y(), n.Z()],
+      x: [xd.X(), xd.Y(), xd.Z()],
+    };
+  }
+  const edges = collectUniqueEdges(oc, body.shape);
+  const index = resolveTopoRef(state, body, ref as AnyRef, "edge", (name) =>
+    upgradeRef(ref as AnyRef, name),
+  );
+  const edge = edges[index]!;
+  const curve = new oc.BRepAdaptor_Curve_2(edge);
+  if (curve.GetType().value !== oc.GeomAbs_CurveType.GeomAbs_Circle.value) {
+    throw new Error("Joint: pick a planar face or circular edge");
+  }
+  const circ = curve.Circle();
+  const loc = circ.Location();
+  const ax = circ.Axis().Direction();
+  const z: V3 = [ax.X(), ax.Y(), ax.Z()];
+  return { origin: [loc.X(), loc.Y(), loc.Z()], z, x: perpendicularOf(z) };
+}
+
+/**
+ * Assembly joint (D6): closed-form placement of the moving body so its mate
+ * frame lands on the target's effective frame — origin offset along target z,
+ * x rotated by `angle` about target z, z anti-aligned unless `flip`
+ * (doc §3). Static placement is identical for all four joint types; the type
+ * gates which parameters the drag solve may vary (M7 UI).
+ */
+function executeJoint(
+  oc: OpenCascadeInstance,
+  feature: JointFeature,
+  state: RegenState,
+  env: (name: string) => number,
+): void {
+  const moving = state.bodies.find((b) => b.id === feature.movingRef.bodyId);
+  const target = state.bodies.find((b) => b.id === feature.targetRef.bodyId);
+  if (!moving) throw new Error(`Joint references missing body ${feature.movingRef.bodyId}`);
+  if (!target) throw new Error(`Joint references missing body ${feature.targetRef.bodyId}`);
+  if (moving === target) throw new Error("Joint: moving and target must be different bodies");
+  const offset = evaluateExpression(feature.offset, env);
+  const angleRad = (evaluateExpression(feature.angle, env) * Math.PI) / 180;
+
+  const m = jointFrame(oc, state, moving, feature.movingRef);
+  const t = jointFrame(oc, state, target, feature.targetRef);
+
+  const origin = ADD(t.origin, V(t.z, offset));
+  const zEff: V3 = feature.flip ? t.z : [-t.z[0], -t.z[1], -t.z[2]];
+  const xEff = rotateAbout(t.x, t.z, angleRad);
+
+  const P = (v: V3): GpPnt => new oc.gp_Pnt_3(v[0], v[1], v[2]);
+  const D = (v: V3): GpDir => new oc.gp_Dir_4(v[0], v[1], v[2]);
+  const trsf = new oc.gp_Trsf_1();
+  // Probe-verified: SetDisplacement(from, to) carries geometry from `from`
+  // onto `to`; gp_Ax3_3 re-orthonormalizes into a right-handed frame.
+  trsf.SetDisplacement(
+    new oc.gp_Ax3_3(P(m.origin), D(m.z), D(m.x)),
+    new oc.gp_Ax3_3(P(origin), D(zEff), D(xEff)),
+  );
+  moving.shape = new oc.BRepBuilderAPI_Transform_2(moving.shape, trsf, false).Shape();
+  // Names carry over verbatim in explorer order — same rule as move.
+  moving.volume = shapeVolume(oc, moving.shape);
+  warnSplitRefs(state, feature.id, [feature.movingRef, feature.targetRef]);
 }
 
 // ---------------------------------------------------------------- import
