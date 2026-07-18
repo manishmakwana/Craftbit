@@ -8,3 +8,4 @@ export * from "./expr";
 export * from "./commands";
 export * from "./units";
 export * from "./fabrication2d";
+export * from "./sketchSolver";

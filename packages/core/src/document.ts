@@ -5,12 +5,13 @@
  * field is an expression string (spec §7.9) evaluated against the parameter
  * table at regeneration time.
  *
- * DELTA FROM SPEC (documented, deliberate): the sketch model here is
- * profile-based (closed shapes with expression-driven dimensions) rather than
- * the full constraint-solver sketcher of §7.6/§6.3 — PlaneGCS integration is
- * design gate D3 and lands later. Profiles still deliver the golden-path
- * workflows (GP-1, GP-2) with honest parametric regeneration.
+ * Sketches carry two coexisting models: quick profiles (rect/circle/polygon
+ * with expression-driven dimensions) and the constraint sketcher of §7.6/§6.3
+ * (design gate D3) — entities + constraints solved at regeneration (see
+ * sketchSolver.ts and docs/design/D3-constraint-sketcher.md).
  */
+
+import type { SketchEntity } from "./sketchSolver";
 
 export const CRAFTBIT_FORMAT_VERSION = 1 as const;
 
@@ -56,6 +57,29 @@ export interface SketchProfilePolygon {
 
 export type SketchProfile = SketchProfileRect | SketchProfileCircle | SketchProfilePolygon;
 
+/**
+ * Constraint-sketcher additions (design gate D3). Entities are geometric
+ * primitives with plain-number coordinates (last solved/drawn state, used as
+ * the next solve's initial guess); constraints relate them declaratively and
+ * dimensional constraint values are expressions. See
+ * docs/design/D3-constraint-sketcher.md and sketchSolver.ts (which owns the
+ * entity type definitions — coordinates there are already plain numbers, so
+ * document and solver share them).
+ */
+export type SketchConstraint =
+  | { id: string; kind: "coincident"; a: string; b: string }
+  | { id: string; kind: "horizontal"; line: string }
+  | { id: string; kind: "vertical"; line: string }
+  | { id: string; kind: "parallel"; a: string; b: string }
+  | { id: string; kind: "perpendicular"; a: string; b: string }
+  | { id: string; kind: "equalLength"; a: string; b: string }
+  | { id: string; kind: "equalRadius"; a: string; b: string }
+  | { id: string; kind: "distance"; a: string; b: string; value: Expr }
+  | { id: string; kind: "radius"; entity: string; value: Expr }
+  | { id: string; kind: "angle"; a: string; b: string; /** degrees */ value: Expr }
+  | { id: string; kind: "tangent"; line: string; circle: string }
+  | { id: string; kind: "fixed"; point: string };
+
 export interface SketchFeature {
   id: string;
   type: "sketch";
@@ -63,6 +87,10 @@ export interface SketchFeature {
   suppressed: boolean;
   plane: PlaneRef;
   profiles: SketchProfile[];
+  /** Constraint-sketcher entities; absent in pre-D3 documents. */
+  entities?: SketchEntity[];
+  /** Constraints over `entities`; absent in pre-D3 documents. */
+  constraints?: SketchConstraint[];
 }
 
 export type ExtrudeOp = "new" | "join" | "cut";

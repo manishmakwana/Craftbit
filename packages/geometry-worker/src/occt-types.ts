@@ -35,6 +35,18 @@ export interface GpCirc {
   readonly __gpCircBrand: never;
 }
 
+export interface GeomCurve {
+  readonly __geomCurveBrand: never;
+}
+
+export interface HandleGeomCurve {
+  readonly __handleGeomCurveBrand: never;
+}
+
+export interface HandleGeomTrimmedCurve {
+  get(): GeomCurve;
+}
+
 export interface GpPln {
   Location(): GpPnt;
   Axis(): { Direction(): GpDir };
@@ -170,6 +182,16 @@ export interface OpenCascadeInstance {
   // Topology builders
   BRepBuilderAPI_MakeEdge_3: new (p1: GpPnt, p2: GpPnt) => { Edge(): TopoDsEdge };
   BRepBuilderAPI_MakeEdge_8: new (circ: GpCirc) => { Edge(): TopoDsEdge };
+  /** Edge from a Geom curve handle (probe-verified for arcs via GC_MakeArcOfCircle_4). */
+  BRepBuilderAPI_MakeEdge_24: new (curve: HandleGeomCurve) => { Edge(): TopoDsEdge };
+  /** 3-point arc: start, any on-arc point, end. */
+  GC_MakeArcOfCircle_4: new (
+    p1: GpPnt,
+    onArc: GpPnt,
+    p2: GpPnt,
+  ) => { IsDone(): boolean; Value(): HandleGeomTrimmedCurve };
+  /** Upcasts a raw Geom curve (e.g. Geom_TrimmedCurve from handle.get()) into Handle_Geom_Curve. */
+  Handle_Geom_Curve_2: new (curve: GeomCurve) => HandleGeomCurve;
   BRepBuilderAPI_MakeWire_1: new () => { Add_1(edge: TopoDsEdge): void; Wire(): TopoDsWire };
   BRepBuilderAPI_MakeWire_2: new (edge: TopoDsEdge) => { Wire(): TopoDsWire };
   BRepBuilderAPI_MakeFace_15: new (

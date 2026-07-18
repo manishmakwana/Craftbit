@@ -9,12 +9,17 @@ Full product & engineering spec: [`docs/SPEC.md`](docs/SPEC.md).
 
 **Working parametric CAD covering the v1 goal: model → assemble → fabricate.**
 Everything below runs in the browser, verified end to end by automated browser tests
-and 44 unit/kernel-regression tests (18 of which assert exact closed-form volumes
+and 80 unit/kernel-regression tests (many asserting exact closed-form volumes
 against the real OCCT kernel):
 
-- **Sketch** on origin planes or picked planar faces: rectangles, circles, polygons,
-  every dimension an expression (units, fractions like `3/8in`, functions, named
-  parameters with cycle detection).
+- **Sketch** on origin planes or picked planar faces — a real **constraint
+  sketcher** (design gate D3): draw chained lines, apply
+  horizontal/vertical/parallel/perpendicular/equal/coincident/tangent/fix
+  constraints and distance/radius/angle dimensions, drag points with the
+  solver keeping everything consistent, live degrees-of-freedom readout
+  ("2 DOF" → "✓ Fully constrained"). Rect/circle/polygon quick-profiles
+  coexist; every dimension is an expression (units, fractions like `3/8in`,
+  functions, named parameters with cycle detection).
 - **Model**: extrude (new/join/cut; normal/reversed/symmetric), revolve, fillet,
   chamfer, shell, mirror, linear & circular patterns, boolean combine
   (join/cut/intersect).
@@ -28,8 +33,10 @@ against the real OCCT kernel):
   file save/open.
 
 Known deltas from the full spec (deliberate, tracked):
-- Sketching is profile-based (rect/circle/polygon with expression dimensions), not yet
-  the PlaneGCS constraint solver of spec §7.6 (design gate D3).
+- The constraint sketcher's numerical core is a custom Levenberg–Marquardt solver
+  with a PlaneGCS-compatible constraint model, not PlaneGCS itself (decision +
+  swap path in `docs/design/D3-constraint-sketcher.md`). Arcs are supported by the
+  solver/kernel; the dedicated arc drawing tool is still to come.
 - Feature references use body+index addressing, not stable topological naming (D2).
 - Assembly is positioning-based (move/rotate features), not the joint solver of §7.10
   (design gate D6); STL/DXF/SVG import (§7.12) not yet implemented (STEP import works).
