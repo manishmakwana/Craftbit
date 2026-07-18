@@ -66,6 +66,9 @@ export function Viewport() {
   const entityClickRef = useRef(false);
   const cubeDragRef = useRef<CubeDragState | null>(null);
   const [hover, setHover] = useState<PickResult | null>(null);
+  // Hovered sketch entity id in Select tool — gives visual feedback on what's
+  // clickable before the user commits to a click (D3 discoverability).
+  const [hoverEntityId, setHoverEntityId] = useState<string | null>(null);
   // Manager also held in state so overlays re-render once it exists.
   const [manager, setManager] = useState<SceneManager | null>(null);
   const [cubeVisible, setCubeVisible] = useState(true);
@@ -112,12 +115,23 @@ export function Viewport() {
     const sceneManager = managerRef.current;
     if (!sceneManager || !result) return;
     sceneManager.setRegenResult(result, useDocumentStore.getState().doc.bodyColors);
-    sceneManager.setSketches(result.sketches, activeSketchId, selectedProfileId, selectedEntityIds);
-  }, [result, activeSketchId, selectedProfileId, selectedEntityIds]);
+    sceneManager.setSketches(
+      result.sketches,
+      activeSketchId,
+      selectedProfileId,
+      selectedEntityIds,
+      hoverEntityId,
+    );
+  }, [result, activeSketchId, selectedProfileId, selectedEntityIds, hoverEntityId]);
 
   useEffect(() => {
     managerRef.current?.setHighlights(hover, selectedFaces, selectedEdges);
   }, [hover, selectedFaces, selectedEdges]);
+
+  // Stale hover would otherwise linger after switching tools/leaving Select.
+  useEffect(() => {
+    setHoverEntityId(null);
+  }, [sketchTool, mode]);
 
   // Camera to sketch plane on entry; restore on exit.
   const prevModeRef = useRef(mode);
@@ -421,6 +435,19 @@ export function Viewport() {
         return;
       }
 
+      // Select tool (idle, not dragging): hover feedback on entities so it's
+      // clear what will be picked before committing to a click.
+      if (sketchTool === "select") {
+        const screen = toLocal(e);
+        const entities = currentEntities();
+        const picked =
+          entities.length > 0
+            ? pickSketchEntity(entities, entityProjector, screen.x, screen.y)
+            : null;
+        setHoverEntityId(picked?.entityId ?? null);
+        return;
+      }
+
       const draw = drawRef.current;
       if (draw) {
         const local = manager.pickOnPlane(ndc.x, ndc.y, activeSketch);
@@ -540,6 +567,7 @@ export function Viewport() {
       managerRef.current?.setViewCubeHover(null, null);
       setCubeHovering(false);
     }
+    if (hoverEntityId) setHoverEntityId(null);
   };
 
   const onDoubleClick = () => {
@@ -586,7 +614,7 @@ export function Viewport() {
     <div
       className="viewport-root"
       ref={containerRef}
-      style={cubeHovering ? { cursor: "pointer" } : undefined}
+      style={cubeHovering || hoverEntityId ? { cursor: "pointer" } : undefined}
       onPointerDown={onPointerDown}
       onPointerMove={onPointerMove}
       onPointerUp={onPointerUp}
