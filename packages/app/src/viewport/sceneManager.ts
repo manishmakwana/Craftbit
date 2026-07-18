@@ -406,6 +406,7 @@ export class SceneManager {
     activeSketchId: string | null,
     selectedProfileId: string | null = null,
     selectedEntityIds: readonly string[] = [],
+    hoverEntityId: string | null = null,
   ): void {
     this.sketchGroup.clear();
     for (const sketch of sketches) {
@@ -425,7 +426,7 @@ export class SceneManager {
         line.userData = { sketchId: sketch.featureId, profileId: profile.id };
         this.sketchGroup.add(line);
       }
-      this.addSketchEntities(sketch, isActive, selectedEntityIds);
+      this.addSketchEntities(sketch, isActive, selectedEntityIds, hoverEntityId);
     }
   }
 
@@ -434,6 +435,7 @@ export class SceneManager {
     sketch: EvaluatedSketch,
     isActive: boolean,
     selectedEntityIds: readonly string[],
+    hoverEntityId: string | null,
   ): void {
     if (sketch.entities.length === 0) return;
     const points = new Map(
@@ -447,9 +449,11 @@ export class SceneManager {
         css(
           isActive && selectedEntityIds.includes(id)
             ? "--vp-selected"
-            : isActive
-              ? "--vp-sketch"
-              : "--vp-sketch-dim",
+            : isActive && id === hoverEntityId
+              ? "--vp-hover"
+              : isActive
+                ? "--vp-sketch"
+                : "--vp-sketch-dim",
         ),
       );
 
@@ -507,11 +511,16 @@ export class SceneManager {
       const colors: number[] = [];
       const normal = new THREE.Color(css("--vp-sketch-point"));
       const selected = new THREE.Color(css("--vp-selected"));
+      const hovered = new THREE.Color(css("--vp-hover"));
       for (const e of sketch.entities) {
         if (e.kind !== "point") continue;
         const w = at(e.x, e.y);
         positions.push(w.x, w.y, w.z);
-        const c = selectedEntityIds.includes(e.id) ? selected : normal;
+        const c = selectedEntityIds.includes(e.id)
+          ? selected
+          : e.id === hoverEntityId
+            ? hovered
+            : normal;
         colors.push(c.r, c.g, c.b);
       }
       if (positions.length > 0) {
