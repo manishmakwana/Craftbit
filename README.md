@@ -9,7 +9,7 @@ Full product & engineering spec: [`docs/SPEC.md`](docs/SPEC.md).
 
 **Working parametric CAD covering the v1 goal: model → assemble → fabricate.**
 Everything below runs in the browser, verified end to end by automated browser tests
-and 80 unit/kernel-regression tests (many asserting exact closed-form volumes
+and 95 unit/kernel-regression tests (many asserting exact closed-form volumes
 against the real OCCT kernel):
 
 - **Sketch** on origin planes or picked planar faces — a real **constraint
@@ -31,13 +31,18 @@ against the real OCCT kernel):
 - **Never lose work**: feature timeline with edit/delete and per-feature error
   reporting, unlimited undo/redo, IndexedDB autosave surviving reload, `.craftbit`
   file save/open.
+- **Stable references** (design gate D2): every face/edge reference stores a
+  lineage-encoded **topological name** minted from OCCT history — sketches on
+  faces and fillets/chamfers/shells survive upstream edits that reorder the
+  kernel's face/edge enumeration, and a reference that truly disappears fails
+  loudly with a re-pick message instead of silently grabbing the wrong face.
+  v1 documents upgrade in place on first load (format v2).
 
 Known deltas from the full spec (deliberate, tracked):
 - The constraint sketcher's numerical core is a custom Levenberg–Marquardt solver
   with a PlaneGCS-compatible constraint model, not PlaneGCS itself (decision +
   swap path in `docs/design/D3-constraint-sketcher.md`). Arcs are supported by the
   solver/kernel; the dedicated arc drawing tool is still to come.
-- Feature references use body+index addressing, not stable topological naming (D2).
 - Assembly is positioning-based (move/rotate features), not the joint solver of §7.10
   (design gate D6); STL/DXF/SVG import (§7.12) not yet implemented (STEP import works).
 - Kernel is the prebuilt OCCT 7.4 full build (~14 MB gzipped), not the custom minimal

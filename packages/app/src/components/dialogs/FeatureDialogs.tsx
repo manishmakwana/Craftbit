@@ -20,6 +20,7 @@ import {
 } from "@craftbit/core";
 import { useDocumentStore } from "../../stores/documentStore";
 import { useGeometryStore } from "../../stores/geometryStore";
+import { toEdgeRefs, toFaceRefs } from "../../stores/topoRefs";
 import { useUiStore } from "../../stores/uiStore";
 import { ExpressionInput } from "../ExpressionInput";
 
@@ -196,13 +197,15 @@ export function ChamferDialog({ featureId }: { featureId?: string }) {
         onCancel={cancel}
         onOk={() => {
           if (edges.length === 0) return showToast("Select at least one edge first", true);
+          const refs = toEdgeRefs(edges);
+          if (!refs) return showToast("Selection is stale — re-pick the edges", true);
           const count = doc.features.filter((f) => f.type === "chamfer").length;
           commit({
             id: existing?.id ?? newId(),
             type: "chamfer",
             name: existing?.name ?? `Chamfer ${count + 1}`,
             suppressed: false,
-            edges: edges.map((e) => ({ bodyId: e.bodyId, edgeIndex: e.edgeIndex })),
+            edges: refs,
             distance,
           });
         }}
@@ -240,13 +243,15 @@ export function ShellDialog({ featureId }: { featureId?: string }) {
         onCancel={cancel}
         onOk={() => {
           if (faces.length === 0) return showToast("Select at least one face to open", true);
+          const refs = toFaceRefs(faces);
+          if (!refs) return showToast("Selection is stale — re-pick the faces", true);
           const count = doc.features.filter((f) => f.type === "shell").length;
           commit({
             id: existing?.id ?? newId(),
             type: "shell",
             name: existing?.name ?? `Shell ${count + 1}`,
             suppressed: false,
-            faces: faces.map((f) => ({ bodyId: f.bodyId, faceIndex: f.faceIndex })),
+            faces: refs,
             thickness,
           });
         }}

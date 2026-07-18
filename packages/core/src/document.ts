@@ -13,20 +13,37 @@
 
 import type { SketchEntity } from "./sketchSolver";
 
-export const CRAFTBIT_FORMAT_VERSION = 1 as const;
+/**
+ * v2 (design gate D2): geometry references store lineage-encoded topological
+ * names ({ bodyId, name }) instead of enumeration indices. v1 documents are
+ * accepted by the loader and upgraded once via the worker's upgrade regen
+ * (index → name capture), then persist as v2.
+ */
+export const CRAFTBIT_FORMAT_VERSION = 2 as const;
+export const SUPPORTED_FORMAT_VERSIONS: readonly number[] = [1, 2];
 
 export type Expr = string;
 
 export type OriginPlaneName = "XY" | "XZ" | "YZ";
 
+/**
+ * A stable reference to a face or edge of a body: `name` is a D2
+ * lineage-encoded topological name minted by the geometry worker
+ * (opaque to the app — stored, compared, never parsed outside the worker).
+ */
+export interface TopoRef {
+  bodyId: string;
+  name: string;
+}
+
 export type PlaneRef =
   | { kind: "origin"; plane: OriginPlaneName }
   | {
-      /** A planar face of an existing body, identified by body + face index
-       * as of the regeneration state just before this sketch's feature. */
+      /** A planar face of an existing body, by topological name. Legacy v1
+       * documents carry `faceIndex` instead until the upgrade regen runs. */
       kind: "face";
       bodyId: string;
-      faceIndex: number;
+      name: string;
     };
 
 export interface SketchProfileRect {
@@ -109,12 +126,12 @@ export interface ExtrudeFeature {
   operation: ExtrudeOp;
 }
 
-export interface EdgeRef {
+/** Legacy v1 index-based refs — accepted only by the one-time upgrade regen. */
+export interface LegacyEdgeRef {
   bodyId: string;
   edgeIndex: number;
 }
-
-export interface FaceRef {
+export interface LegacyFaceRef {
   bodyId: string;
   faceIndex: number;
 }
@@ -124,7 +141,7 @@ export interface FilletFeature {
   type: "fillet";
   name: string;
   suppressed: boolean;
-  edges: EdgeRef[];
+  edges: TopoRef[];
   radius: Expr;
 }
 
@@ -133,7 +150,7 @@ export interface ChamferFeature {
   type: "chamfer";
   name: string;
   suppressed: boolean;
-  edges: EdgeRef[];
+  edges: TopoRef[];
   distance: Expr;
 }
 
@@ -157,7 +174,7 @@ export interface ShellFeature {
   name: string;
   suppressed: boolean;
   /** Faces to remove (open sides); all must belong to the same body. */
-  faces: FaceRef[];
+  faces: TopoRef[];
   thickness: Expr;
 }
 
@@ -269,7 +286,8 @@ export interface Parameter {
 export type DisplayUnit = "mm" | "cm" | "m" | "in";
 
 export interface CraftbitDocument {
-  formatVersion: typeof CRAFTBIT_FORMAT_VERSION;
+  /** 2 for current documents; 1 only transiently, until the upgrade regen. */
+  formatVersion: number;
   id: string;
   name: string;
   units: DisplayUnit;
@@ -291,11 +309,12 @@ export function createEmptyDocument(id: string, name: string): CraftbitDocument 
   };
 }
 
-/** Structural validation on load — throws with a readable message. */
+/** Structural validation on load — throws with a readable message. v1
+ * documents are accepted (the app upgrades them once via the worker). */
 export function validateDocument(doc: unknown): CraftbitDocument {
   if (typeof doc !== "object" || doc === null) throw new Error("Document is not an object");
   const d = doc as Record<string, unknown>;
-  if (d.formatVersion !== CRAFTBIT_FORMAT_VERSION) {
+  if (!SUPPORTED_FORMAT_VERSIONS.includes(d.formatVersion as number)) {
     throw new Error(`Unsupported format version ${String(d.formatVersion)}`);
   }
   if (typeof d.id !== "string" || typeof d.name !== "string") {

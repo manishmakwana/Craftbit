@@ -1,8 +1,13 @@
 /// <reference lib="webworker" />
 import * as Comlink from "comlink";
-import { deserializeDocument } from "@craftbit/core";
+import { deserializeDocument, type CraftbitDocument } from "@craftbit/core";
 import { loadOcct } from "./occLoader";
-import { regenerateDocument, type EvaluatedSketch, type FeatureStatus } from "./regen";
+import {
+  regenerateDocument,
+  upgradeDocumentRefs,
+  type EvaluatedSketch,
+  type FeatureStatus,
+} from "./regen";
 import { tessellateShape, type TessellatedMesh } from "./tessellate";
 import { exportStep, exportStl, type StlValidation } from "./exporters";
 
@@ -12,6 +17,10 @@ export interface BodyResult {
   faceCount: number;
   edgeCount: number;
   mesh: TessellatedMesh;
+  /** D2 topological names, index-aligned with the tessellation's face ids. */
+  faceNames: string[];
+  /** D2 topological names, index-aligned with the tessellation's edge indices. */
+  edgeNames: string[];
 }
 
 export interface RegenResult {
@@ -35,6 +44,8 @@ export interface GeometryWorkerApi {
    * discard stale responses that were superseded by newer edits (D1 §open-q-1).
    */
   regenerate(docJson: string, generation: number): Promise<RegenResult>;
+  /** One-time v1→v2 upgrade: legacy index refs rewritten to D2 names. */
+  upgradeDocument(docJson: string): Promise<{ doc: CraftbitDocument; failures: string[] }>;
   exportStl(docJson: string, bodyIds: string[]): Promise<StlExportResult>;
   exportStep(docJson: string, bodyIds: string[]): Promise<Uint8Array>;
 }
@@ -64,6 +75,8 @@ const api: GeometryWorkerApi = {
         faceCount,
         edgeCount: mesh.edgeRanges.length / 3,
         mesh,
+        faceNames: body.names.faceNames,
+        edgeNames: body.names.edgeNames,
       };
     });
 
@@ -86,6 +99,12 @@ const api: GeometryWorkerApi = {
       );
     }
     return Comlink.transfer(result, transfers) as unknown as RegenResult;
+  },
+
+  async upgradeDocument(docJson) {
+    const oc = await loadOcct();
+    const doc = deserializeDocument(docJson);
+    return upgradeDocumentRefs(oc, doc);
   },
 
   async exportStl(docJson, bodyIds) {

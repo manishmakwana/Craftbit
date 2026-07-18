@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { newId, type FilletFeature } from "@craftbit/core";
 import { useDocumentStore } from "../../stores/documentStore";
+import { toEdgeRefs } from "../../stores/topoRefs";
 import { useUiStore } from "../../stores/uiStore";
 import { ExpressionInput } from "../ExpressionInput";
 
@@ -16,24 +17,23 @@ export function FilletDialog({ featureId }: { featureId?: string }) {
       : undefined;
 
   const [radius, setRadius] = useState(existing?.radius ?? "2");
-  const edges =
-    existing && selectedEdges.length === 0
-      ? existing.edges
-      : selectedEdges.map((e) => ({
-          bodyId: e.bodyId,
-          edgeIndex: e.edgeIndex,
-        }));
+  const edges = existing && selectedEdges.length === 0 ? existing.edges : selectedEdges;
 
   const ok = () => {
     if (edges.length === 0) {
       showToast("Select at least one edge in the viewport first", true);
       return;
     }
+    const refs = toEdgeRefs(edges);
+    if (!refs) {
+      showToast("Selection is stale — re-pick the edges", true);
+      return;
+    }
     if (existing) {
       dispatch({
         kind: "updateFeature",
         featureId: existing.id,
-        next: { ...existing, radius, edges },
+        next: { ...existing, radius, edges: refs },
       });
     } else {
       const count = doc.features.filter((f) => f.type === "fillet").length;
@@ -45,7 +45,7 @@ export function FilletDialog({ featureId }: { featureId?: string }) {
           name: `Fillet ${count + 1}`,
           suppressed: false,
           radius,
-          edges,
+          edges: refs,
         },
       });
     }

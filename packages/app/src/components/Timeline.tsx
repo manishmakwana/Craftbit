@@ -59,19 +59,25 @@ export function Timeline() {
       {doc.features.map((feature) => {
         const status = statuses[feature.id];
         const isError = status?.level === "error";
+        const isWarning = status?.level === "warning";
         const isSelected = selectedFeatureId === feature.id;
         return (
           <div
             key={feature.id}
             className={`timeline-chip ${isSelected ? "selected" : ""} ${isError ? "error" : ""}`}
             data-testid={`chip-${feature.type}`}
-            title={isError ? status?.message : feature.name}
+            title={isError || isWarning ? status?.message : feature.name}
             onClick={() => setSelectedFeature(isSelected ? null : feature.id)}
             onDoubleClick={() => onEdit(feature)}
           >
             <span className="chip-icon">{ICONS[feature.type]}</span>
             <span>{feature.name}</span>
             {isError && <span className="error-badge">!</span>}
+            {isWarning && (
+              <span className="warning-badge" data-testid="warning-badge">
+                ⚠
+              </span>
+            )}
             {isSelected && (
               <>
                 <button

@@ -50,6 +50,24 @@ export const useGeometryStore = create<GeometryState>((set) => ({
   },
 
   requestRegen(doc) {
+    // v1 documents (index-based refs) upgrade once through the worker's
+    // capture regen (D2 §2.4); the replaced document re-triggers regen as v2.
+    if (doc.formatVersion === 1) {
+      import("./documentStore")
+        .then(async ({ useDocumentStore }) => {
+          const { doc: upgraded, failures } = await worker().api.upgradeDocument(
+            serializeDocument(doc),
+          );
+          useDocumentStore.getState().replaceDocument(upgraded);
+          if (failures.length > 0) {
+            set({
+              lastError: `${failures.length} feature(s) had unresolvable references after upgrade — edit them to re-pick`,
+            });
+          }
+        })
+        .catch((e: unknown) => set({ lastError: e instanceof Error ? e.message : String(e) }));
+      return;
+    }
     if (debounceTimer) clearTimeout(debounceTimer);
     debounceTimer = setTimeout(() => {
       const myGeneration = ++generation;

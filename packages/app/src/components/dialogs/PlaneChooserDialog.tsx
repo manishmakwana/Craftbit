@@ -1,5 +1,6 @@
 import { newId, type OriginPlaneName, type SketchFeature } from "@craftbit/core";
 import { useDocumentStore } from "../../stores/documentStore";
+import { faceSelToRef } from "../../stores/topoRefs";
 import { useUiStore } from "../../stores/uiStore";
 
 /** Small popover: pick XY/XZ/YZ, or the selected face, to start a sketch. */
@@ -7,7 +8,7 @@ export function PlaneChooserDialog() {
   const dispatch = useDocumentStore((s) => s.dispatch);
   const doc = useDocumentStore((s) => s.doc);
   const selectedFaces = useUiStore((s) => s.selectedFaces);
-  const { openDialog, enterSketch } = useUiStore.getState();
+  const { openDialog, enterSketch, showToast } = useUiStore.getState();
 
   const create = (plane: SketchFeature["plane"]) => {
     const sketchCount = doc.features.filter((f) => f.type === "sketch").length;
@@ -43,7 +44,11 @@ export function PlaneChooserDialog() {
         <button
           className="btn primary"
           data-testid="plane-face"
-          onClick={() => create({ kind: "face", bodyId: face.bodyId, faceIndex: face.faceIndex })}
+          onClick={() => {
+            const ref = faceSelToRef(face);
+            if (!ref) return showToast("Selection is stale — re-pick the face", true);
+            create({ kind: "face", bodyId: ref.bodyId, name: ref.name });
+          }}
         >
           Selected face
         </button>

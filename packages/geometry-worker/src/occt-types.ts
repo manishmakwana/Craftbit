@@ -116,25 +116,43 @@ export interface ShapeMaker {
   Shape(): TopoDsShape;
 }
 
+/**
+ * OCCT history surface shared by BRepBuilderAPI_MakeShape descendants.
+ * Probe-verified (naming-probe.test.ts): lists drain destructively via
+ * Size() + First_1() + RemoveFirst() — treat every returned list as
+ * consume-once.
+ */
+export interface ShapeHistory {
+  Generated(s: TopoDsShape): TopToolsListOfShape;
+  Modified(s: TopoDsShape): TopToolsListOfShape;
+  IsDeleted(s: TopoDsShape): boolean;
+}
+
+/** Sweep builders additionally expose the two cap faces. */
+export interface SweepMaker extends ShapeMaker, ShapeHistory {
+  FirstShape(): TopoDsShape;
+  LastShape(): TopoDsShape;
+}
+
 export interface GPropGProps {
   Mass(): number;
   CentreOfMass(): GpPnt;
 }
 
-export interface BRepAlgoApiBoolean {
+export interface BRepAlgoApiBoolean extends ShapeHistory {
   Build(): void;
   IsDone(): boolean;
   Shape(): TopoDsShape;
 }
 
-export interface BRepFilletApiMakeFillet {
+export interface BRepFilletApiMakeFillet extends ShapeHistory {
   Add_2(radius: number, edge: TopoDsEdge): void;
   Build(): void;
   IsDone(): boolean;
   Shape(): TopoDsShape;
 }
 
-export interface BRepFilletApiMakeChamfer {
+export interface BRepFilletApiMakeChamfer extends ShapeHistory {
   Add_2(distance: number, edge: TopoDsEdge): void;
   Build(): void;
   IsDone(): boolean;
@@ -144,6 +162,8 @@ export interface BRepFilletApiMakeChamfer {
 export interface TopToolsListOfShape {
   Append_1(shape: TopoDsShape): void;
   Size(): number;
+  First_1(): TopoDsShape;
+  RemoveFirst(): void;
 }
 
 export interface BRepAdaptorCurve {
@@ -206,13 +226,13 @@ export interface OpenCascadeInstance {
     vec: GpVec,
     copy: boolean,
     canonize: boolean,
-  ) => ShapeMaker;
+  ) => SweepMaker;
   BRepPrimAPI_MakeRevol_1: new (
     face: TopoDsShape,
     axis: GpAx1,
     angleRad: number,
     copy: boolean,
-  ) => ShapeMaker;
+  ) => SweepMaker;
 
   // Booleans (OCCT 7.4: two-arg ctor, no-arg Build)
   BRepAlgoAPI_Cut_3: new (target: TopoDsShape, tool: TopoDsShape) => BRepAlgoApiBoolean;
@@ -239,7 +259,7 @@ export interface OpenCascadeInstance {
     selfInter: boolean,
     join: { value: number },
     removeIntEdges: boolean,
-  ) => { IsDone(): boolean; Shape(): TopoDsShape };
+  ) => ShapeHistory & { IsDone(): boolean; Shape(): TopoDsShape };
   BRepOffset_Mode: { BRepOffset_Skin: { value: number } };
   GeomAbs_JoinType: { GeomAbs_Arc: { value: number } };
 
@@ -265,6 +285,12 @@ export interface OpenCascadeInstance {
       useTriangulation: boolean,
     ): void;
     SurfaceProperties_1(
+      shape: TopoDsShape,
+      props: GPropGProps,
+      skipShared: boolean,
+      useTriangulation: boolean,
+    ): void;
+    LinearProperties(
       shape: TopoDsShape,
       props: GPropGProps,
       skipShared: boolean,
