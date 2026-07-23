@@ -621,6 +621,18 @@ export class SceneManager {
     };
   }
 
+  /** Client (CSS px) coordinates → sketch-local (x, y) on the sketch plane. */
+  screenToLocal(
+    clientX: number,
+    clientY: number,
+    sketch: EvaluatedSketch,
+  ): { x: number; y: number } | null {
+    const rect = this.renderer.domElement.getBoundingClientRect();
+    const ndcX = ((clientX - rect.left) / rect.width) * 2 - 1;
+    const ndcY = -(((clientY - rect.top) / rect.height) * 2 - 1);
+    return this.pickOnPlane(ndcX, ndcY, sketch);
+  }
+
   // ------------------------------------------------------------ highlights
 
   setHighlights(

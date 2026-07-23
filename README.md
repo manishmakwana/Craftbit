@@ -9,17 +9,21 @@ Full product & engineering spec: [`docs/SPEC.md`](docs/SPEC.md).
 
 **Working parametric CAD covering the v1 goal: model → assemble → fabricate.**
 Everything below runs in the browser, verified end to end by automated browser tests
-and 102 unit/kernel-regression tests (many asserting exact closed-form volumes
+and 104 unit/kernel-regression tests (many asserting exact closed-form volumes
 against the real OCCT kernel):
 
 - **Sketch** on origin planes or picked planar faces — a real **constraint
   sketcher** (design gate D3): draw chained lines, apply
   horizontal/vertical/parallel/perpendicular/equal/coincident/tangent/fix
-  constraints and distance/radius/angle dimensions, drag points with the
-  solver keeping everything consistent, live degrees-of-freedom readout
-  ("2 DOF" → "✓ Fully constrained"). Rect/circle/polygon quick-profiles
-  coexist; every dimension is an expression (units, fractions like `3/8in`,
-  functions, named parameters with cycle detection).
+  constraints, drag points with the solver keeping everything consistent, live
+  degrees-of-freedom readout ("2 DOF" → "✓ Fully constrained"). A **Fusion-style
+  Dimension tool** (press `D`) infers the dimension from what you click —
+  line length, point/line distance, angle between two lines, radius or
+  diameter — and drops full drafting graphics (witness lines, arrows,
+  draggable placement) that stay driving constraints, so editing a value
+  re-solves the geometry. Rect/circle/polygon quick-profiles coexist; every
+  dimension is an expression (units, fractions like `3/8in`, functions, named
+  parameters with cycle detection).
 - **Model**: extrude (new/join/cut; normal/reversed/symmetric), revolve, fillet,
   chamfer, shell, mirror, linear & circular patterns, boolean combine
   (join/cut/intersect).

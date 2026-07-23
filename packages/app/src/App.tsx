@@ -97,6 +97,9 @@ export function App() {
         case "c":
           if (ui.mode === "sketch") ui.setSketchTool("circle");
           break;
+        case "d":
+          if (ui.mode === "sketch") ui.setSketchTool("dimension");
+          break;
       }
     };
     window.addEventListener("keydown", onKey);

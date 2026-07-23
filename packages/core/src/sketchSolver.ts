@@ -58,7 +58,9 @@ export type SolvedConstraint =
   | { id: string; kind: "equalLength"; a: string; b: string }
   | { id: string; kind: "equalRadius"; a: string; b: string }
   | { id: string; kind: "distance"; a: string; b: string; value: number }
+  | { id: string; kind: "lineDistance"; a: string; b: string; value: number }
   | { id: string; kind: "radius"; entity: string; value: number }
+  | { id: string; kind: "diameter"; entity: string; value: number }
   | { id: string; kind: "angle"; a: string; b: string; /** degrees */ value: number }
   | { id: string; kind: "tangent"; line: string; circle: string }
   | { id: string; kind: "fixed"; point: string };
@@ -236,10 +238,33 @@ function buildSystem(
         residuals.push((p) => Math.hypot(ax(p) - bx(p), ay(p) - by(p)) - v);
         break;
       }
+      case "lineDistance": {
+        // Perpendicular distance from line b's first endpoint to the infinite
+        // line a (the two lines are expected parallel — same form as tangent).
+        const la = line(c.a);
+        const lb = line(c.b);
+        const [x1, y1, x2, y2] = [px(la.p1), py(la.p1), px(la.p2), py(la.p2)];
+        const [bx, by] = [px(lb.p1), py(lb.p1)];
+        const v = c.value;
+        residuals.push((p) => {
+          const dx = x2(p) - x1(p);
+          const dy = y2(p) - y1(p);
+          const len = Math.max(1e-9, Math.hypot(dx, dy));
+          const dist = Math.abs(dy * (bx(p) - x1(p)) - dx * (by(p) - y1(p))) / len;
+          return dist - v;
+        });
+        break;
+      }
       case "radius": {
         const r = radiusOf(c.entity);
         const v = c.value;
         residuals.push((p) => r(p) - v);
+        break;
+      }
+      case "diameter": {
+        const r = radiusOf(c.entity);
+        const v = c.value;
+        residuals.push((p) => r(p) - v / 2);
         break;
       }
       case "angle": {
