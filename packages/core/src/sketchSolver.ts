@@ -500,7 +500,13 @@ export function resolveSketchConstraints(
 // --------------------------------------------------------------- loops
 
 export type LoopSegment =
-  | { kind: "line"; a: { x: number; y: number }; b: { x: number; y: number } }
+  | {
+      kind: "line";
+      a: { x: number; y: number };
+      b: { x: number; y: number };
+      /** Source sketch entity id (stable UUID) — the D2 curve key for this segment. */
+      entityId?: string;
+    }
   | {
       kind: "arc";
       center: { x: number; y: number };
@@ -510,6 +516,8 @@ export type LoopSegment =
       radius: number;
       /** true when traversal a→b runs counter-clockwise. */
       ccw: boolean;
+      /** Source sketch entity id (stable UUID) — the D2 curve key for this segment. */
+      entityId?: string;
     };
 
 export interface SketchLoop {
@@ -617,7 +625,7 @@ export function extractLoops(
       const bNode = e.n1 === fromNode ? e.n2 : e.n1;
       const a = coord(aNode);
       const b = coord(bNode);
-      if (e.ent.kind === "line") return { kind: "line", a, b };
+      if (e.ent.kind === "line") return { kind: "line", a, b, entityId: e.ent.id };
       const centerPt = pointOf(e.ent.center) ?? coord(find(e.ent.center));
       const radius = Math.hypot(a.x - centerPt.x, a.y - centerPt.y);
       // Stored ccw is for start→end; walking end→start flips it.
@@ -629,6 +637,7 @@ export function extractLoops(
         b,
         radius,
         ccw: forward ? e.ent.ccw : !e.ent.ccw,
+        entityId: e.ent.id,
       };
     });
 

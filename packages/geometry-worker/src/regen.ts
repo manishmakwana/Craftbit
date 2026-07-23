@@ -8,10 +8,11 @@
  * maps to `origin + x·xdir + y·ydir` of its resolved plane, so no shape-level
  * transforms are needed.
  *
- * KNOWN LIMITATION (documented; real fix is design gate D2, spec §12.1):
- * downstream references are (bodyId, face/edge index in current enumeration
- * order), not stable topological names. Editing an upstream feature can shift
- * indices; the referencing feature then errors or attaches differently.
+ * References resolve through D2 topological names (naming.ts,
+ * docs/design/D2-topological-naming.md): every face/edge carries a
+ * lineage-encoded name recomputed each regen from OCCT history; document
+ * refs store names and resolution fails loudly instead of guessing. Legacy
+ * v1 index refs are honored only during the one-time upgrade regen.
  */
 
 import {
@@ -27,11 +28,12 @@ import {
   type ChamferFeature,
   type CircularPatternFeature,
   type CraftbitDocument,
-  type EdgeRef,
   type ExtrudeFeature,
   type Feature,
   type FilletFeature,
   type ImportStepFeature,
+  type JointFeature,
+  type JointRef,
   type LinearPatternFeature,
   type LoopSegment,
   type MirrorFeature,
@@ -42,19 +44,36 @@ import {
   type SketchEntity,
   type SketchFeature,
   type SketchProfile,
+  type TopoRef,
 } from "@craftbit/core";
 import type {
   GpDir,
   GpPnt,
   OpenCascadeInstance,
+  SweepMaker,
   TopoDsEdge,
   TopoDsFace,
   TopoDsShape,
   TopoDsWire,
 } from "./occt-types";
+import { collectFaces, collectUniqueEdges } from "./topo";
+import {
+  describeResolveFailure,
+  nameByOrder,
+  nameByOrdinal,
+  nameFromHistory,
+  namedInputs,
+  resolveName,
+  shapeCentroid,
+  type NamedShape,
+  type NamingReport,
+  type TopoNames,
+} from "./naming";
+
+export { collectFaces, collectUniqueEdges };
 
 export interface FeatureStatus {
-  level: "ok" | "error";
+  level: "ok" | "warning" | "error";
   message?: string;
 }
 
@@ -92,6 +111,8 @@ export interface RegenBody {
   id: string;
   shape: TopoDsShape;
   volume: number;
+  /** D2 name tables, explorer-order aligned with collectFaces/collectUniqueEdges. */
+  names: TopoNames;
 }
 
 export interface RegenState {
@@ -100,6 +121,42 @@ export interface RegenState {
   statuses: Record<string, FeatureStatus>;
   parameterValues: Record<string, number>;
   parameterError?: string;
+  /** Set during the one-time v1→v2 upgrade regen: legacy index refs are
+   * rewritten to names on this document as they resolve (doc §2.4). */
+  upgradeTarget?: CraftbitDocument;
+}
+
+/** Downgrades a feature's status to warning (never masks an error). */
+function addWarning(state: RegenState, featureId: string, message: string): void {
+  const current = state.statuses[featureId];
+  if (current?.level === "error") return;
+  const combined = current?.message ? `${current.message}; ${message}` : message;
+  state.statuses[featureId] = { level: "warning", message: combined };
+}
+
+/** Post-op warning when history left unnamed FACES behind (a real lineage
+ * gap — e.g. shell's offset faces, per the Phase-0 probe). Orphan edges are
+ * routine byproducts (fresh fillet/chamfer boundaries) and stay silent —
+ * their names are still stable while topology count is stable. */
+function warnOrphans(state: RegenState, featureId: string, report: NamingReport): void {
+  if (report.orphanFaces > 0) {
+    addWarning(
+      state,
+      featureId,
+      `${report.orphanFaces} face(s) without history lineage (orphan names)`,
+    );
+  }
+}
+
+/** Split-mark refs are valid but fragile (D2 §2.3) — regen flags them. */
+function warnSplitRefs(state: RegenState, featureId: string, refs: readonly TopoRef[]): void {
+  if (refs.some((r) => r.name?.includes(";s"))) {
+    addWarning(
+      state,
+      featureId,
+      "references a split face/edge — may need reattachment after upstream edits",
+    );
+  }
 }
 
 const V = (v: [number, number, number], s: number): [number, number, number] => [
@@ -112,13 +169,18 @@ const ADD = (
   b: [number, number, number],
 ): [number, number, number] => [a[0] + b[0], a[1] + b[1], a[2] + b[2]];
 
-export function regenerateDocument(oc: OpenCascadeInstance, doc: CraftbitDocument): RegenState {
+export function regenerateDocument(
+  oc: OpenCascadeInstance,
+  doc: CraftbitDocument,
+  options: { upgrade?: boolean } = {},
+): RegenState {
   const state: RegenState = {
     bodies: [],
     sketches: [],
     statuses: {},
     parameterValues: {},
   };
+  if (options.upgrade) state.upgradeTarget = doc;
 
   let paramEnv: (name: string) => number;
   try {
@@ -197,6 +259,9 @@ function executeFeature(
     case "move":
       executeMove(oc, feature, state, env);
       break;
+    case "joint":
+      executeJoint(oc, feature, state, env);
+      break;
     case "importStep":
       executeImportStep(oc, feature, state);
       break;
@@ -221,8 +286,10 @@ export function resolvePlane(
   const body = state.bodies.find((b) => b.id === ref.bodyId);
   if (!body) throw new Error(`Sketch plane references missing body ${ref.bodyId}`);
   const faces = collectFaces(oc, body.shape);
-  const face = faces[ref.faceIndex];
-  if (!face) throw new Error(`Sketch plane references missing face #${ref.faceIndex}`);
+  const index = resolveTopoRef(state, body, ref as AnyRef, "face", (name) =>
+    upgradeRef(ref as AnyRef, name),
+  );
+  const face = faces[index]!;
 
   const surf = new oc.BRepAdaptor_Surface_2(face, true);
   if (surf.GetType().value !== oc.GeomAbs_SurfaceType.GeomAbs_Plane.value) {
@@ -286,6 +353,13 @@ function executeSketch(
   env: (name: string) => number,
 ): void {
   const plane = resolvePlane(oc, feature.plane, state);
+  if (feature.plane.kind === "face" && feature.plane.name?.includes(";s")) {
+    addWarning(
+      state,
+      feature.id,
+      "sketch plane references a split face — may need reattachment after upstream edits",
+    );
+  }
   const profiles = feature.profiles.map((p) => evaluateProfile(p, env));
 
   // Constraint-sketcher entities (D3): re-solve at every regeneration so
@@ -407,56 +481,116 @@ function planeMapper(oc: OpenCascadeInstance, plane: ResolvedPlane): PlaneMapper
   };
 }
 
-/** Wire from a constraint-sketcher loop: exact line and arc edges. Arcs use
- * the 3-point form (start, on-arc midpoint, end) — probe-verified to produce
- * exact areas/volumes (see docs/design/D3-constraint-sketcher.md §5). */
-function loopWire(oc: OpenCascadeInstance, segments: LoopSegment[], map: PlaneMapper): TopoDsWire {
-  const maker = new oc.BRepBuilderAPI_MakeWire_1();
-  for (const seg of segments) {
-    if (Math.hypot(seg.b.x - seg.a.x, seg.b.y - seg.a.y) < 1e-9) continue;
-    if (seg.kind === "line") {
-      maker.Add_1(
-        new oc.BRepBuilderAPI_MakeEdge_3(
-          map.point(seg.a.x, seg.a.y),
-          map.point(seg.b.x, seg.b.y),
-        ).Edge(),
-      );
-    } else {
-      const mid = arcMidpoint(seg);
-      const mk = new oc.GC_MakeArcOfCircle_4(
-        map.point(seg.a.x, seg.a.y),
-        map.point(mid.x, mid.y),
-        map.point(seg.b.x, seg.b.y),
-      );
-      if (!mk.IsDone()) throw new Error("Arc construction failed");
-      const curveHandle = new oc.Handle_Geom_Curve_2(mk.Value().get());
-      maker.Add_1(new oc.BRepBuilderAPI_MakeEdge_24(curveHandle).Edge());
-    }
-  }
-  return maker.Wire();
+/** A profile-wire edge tagged with its D2 curve key and world endpoints. */
+interface KeyedEdge {
+  edge: TopoDsEdge;
+  /** curveKey `sketchFeatId:profileId:segKey` (doc §3.1); segKey is the D3
+   * entity UUID for loop segments, a positional index otherwise. */
+  key: string;
+  /** World endpoints; null for closed curves (full circles). */
+  a: [number, number, number] | null;
+  b: [number, number, number] | null;
 }
 
-function profileWire(
+interface KeyedWire {
+  wire: TopoDsWire;
+  edges: KeyedEdge[];
+}
+
+/** A profile face whose boundary edges (outer + holes) carry curve keys. */
+interface KeyedFace {
+  face: TopoDsFace;
+  edges: KeyedEdge[];
+}
+
+function worldOf(plane: ResolvedPlane, x: number, y: number): [number, number, number] {
+  return ADD(plane.origin, ADD(V(plane.xdir, x), V(plane.ydir, y)));
+}
+
+/**
+ * BRepBuilderAPI_MakeWire rebuilds edges after the first on shared vertices,
+ * so the edge objects we constructed are not the wire's actual edges (their
+ * TShapes differ — IsSame and Generated() would both miss). Re-anchor each
+ * keyed edge onto the wire's real edge instance by centroid match (exact
+ * same geometry ⇒ identical centroids; 1e-6 tolerance).
+ */
+function reanchorKeyedEdges(oc: OpenCascadeInstance, wire: TopoDsWire, edges: KeyedEdge[]): void {
+  const wireEdges: TopoDsEdge[] = collectUniqueEdges(oc, wire);
+  for (const ke of edges) {
+    const want = shapeCentroidOf(oc, ke.edge);
+    let best: { edge: TopoDsEdge; d: number } | null = null;
+    for (const we of wireEdges) {
+      const c = shapeCentroidOf(oc, we);
+      const d = Math.hypot(c[0] - want[0], c[1] - want[1], c[2] - want[2]);
+      if (!best || d < best.d) best = { edge: we, d };
+    }
+    if (best && best.d < 1e-6) ke.edge = best.edge;
+  }
+}
+
+/** Builds a profile wire keeping each edge's curve key (doc §3.1 curveKey). */
+function keyedProfileWire(
   oc: OpenCascadeInstance,
+  sketchId: string,
   profile: EvaluatedProfile,
+  plane: ResolvedPlane,
   map: PlaneMapper,
-): TopoDsWire {
+): KeyedWire {
+  const keyOf = (seg: string | number) => `${sketchId}:${profile.id}:${seg}`;
+
   if (profile.kind === "circle") {
     const ax = new oc.gp_Ax2_2(map.point(profile.cx, profile.cy), map.normalDir(), map.xDir());
     const edge = new oc.BRepBuilderAPI_MakeEdge_8(new oc.gp_Circ_2(ax, profile.radius)).Edge();
-    return new oc.BRepBuilderAPI_MakeWire_2(edge).Wire();
+    return {
+      wire: new oc.BRepBuilderAPI_MakeWire_2(edge).Wire(),
+      edges: [{ edge, key: keyOf(0), a: null, b: null }],
+    };
   }
+
   if (profile.kind === "loop") {
     // Ensure CCW traversal so faces orient consistently with the other kinds.
     const ccw = signedArea(loopPolygon(profile)) >= 0;
     const segments = ccw
       ? profile.segments
       : [...profile.segments].reverse().map((s) => {
-          if (s.kind === "line") return { kind: "line" as const, a: s.b, b: s.a };
+          if (s.kind === "line") return { ...s, a: s.b, b: s.a };
           return { ...s, a: s.b, b: s.a, ccw: !s.ccw };
         });
-    return loopWire(oc, segments, map);
+    const maker = new oc.BRepBuilderAPI_MakeWire_1();
+    const edges: KeyedEdge[] = [];
+    segments.forEach((seg, i) => {
+      if (Math.hypot(seg.b.x - seg.a.x, seg.b.y - seg.a.y) < 1e-9) return;
+      let edge: TopoDsEdge;
+      if (seg.kind === "line") {
+        edge = new oc.BRepBuilderAPI_MakeEdge_3(
+          map.point(seg.a.x, seg.a.y),
+          map.point(seg.b.x, seg.b.y),
+        ).Edge();
+      } else {
+        const mid = arcMidpoint(seg);
+        const mk = new oc.GC_MakeArcOfCircle_4(
+          map.point(seg.a.x, seg.a.y),
+          map.point(mid.x, mid.y),
+          map.point(seg.b.x, seg.b.y),
+        );
+        if (!mk.IsDone()) throw new Error("Arc construction failed");
+        edge = new oc.BRepBuilderAPI_MakeEdge_24(
+          new oc.Handle_Geom_Curve_2(mk.Value().get()),
+        ).Edge();
+      }
+      maker.Add_1(edge);
+      edges.push({
+        edge,
+        key: keyOf(seg.entityId ?? i),
+        a: worldOf(plane, seg.a.x, seg.a.y),
+        b: worldOf(plane, seg.b.x, seg.b.y),
+      });
+    });
+    const wire = maker.Wire();
+    reanchorKeyedEdges(oc, wire, edges);
+    return { wire, edges };
   }
+
   let pts2d: { x: number; y: number }[];
   if (profile.kind === "rect") {
     pts2d = [
@@ -470,13 +604,18 @@ function profileWire(
     if (signedArea(pts2d) < 0) pts2d.reverse(); // ensure CCW so faces orient consistently
   }
   const maker = new oc.BRepBuilderAPI_MakeWire_1();
+  const edges: KeyedEdge[] = [];
   for (let i = 0; i < pts2d.length; i++) {
     const a = pts2d[i]!;
     const b = pts2d[(i + 1) % pts2d.length]!;
     if (Math.hypot(b.x - a.x, b.y - a.y) < 1e-9) continue;
-    maker.Add_1(new oc.BRepBuilderAPI_MakeEdge_3(map.point(a.x, a.y), map.point(b.x, b.y)).Edge());
+    const edge = new oc.BRepBuilderAPI_MakeEdge_3(map.point(a.x, a.y), map.point(b.x, b.y)).Edge();
+    maker.Add_1(edge);
+    edges.push({ edge, key: keyOf(i), a: worldOf(plane, a.x, a.y), b: worldOf(plane, b.x, b.y) });
   }
-  return maker.Wire();
+  const wire = maker.Wire();
+  reanchorKeyedEdges(oc, wire, edges);
+  return { wire, edges };
 }
 
 function profileArea(p: EvaluatedProfile): number {
@@ -515,11 +654,11 @@ export function groupProfiles(profiles: EvaluatedProfile[]): {
   }));
 }
 
-function buildProfileFaces(
+function buildKeyedFaces(
   oc: OpenCascadeInstance,
   sketch: EvaluatedSketch,
   profileIds: string[],
-): TopoDsFace[] {
+): KeyedFace[] {
   const selected =
     profileIds.length === 0
       ? sketch.profiles
@@ -527,11 +666,15 @@ function buildProfileFaces(
   if (selected.length === 0) throw new Error("No profiles selected for extrude");
   const map = planeMapper(oc, sketch.plane);
   return groupProfiles(selected).map(({ outer, holes }) => {
-    const fm = new oc.BRepBuilderAPI_MakeFace_15(profileWire(oc, outer, map), true);
+    const outerWire = keyedProfileWire(oc, sketch.featureId, outer, sketch.plane, map);
+    const fm = new oc.BRepBuilderAPI_MakeFace_15(outerWire.wire, true);
+    const edges = [...outerWire.edges];
     for (const hole of holes) {
-      fm.Add(oc.TopoDS.Wire_1(profileWire(oc, hole, map).Reversed()));
+      const holeWire = keyedProfileWire(oc, sketch.featureId, hole, sketch.plane, map);
+      fm.Add(oc.TopoDS.Wire_1(holeWire.wire.Reversed()));
+      edges.push(...holeWire.edges);
     }
-    return fm.Face();
+    return { face: fm.Face(), edges };
   });
 }
 
@@ -541,22 +684,238 @@ function shapeVolume(oc: OpenCascadeInstance, shape: TopoDsShape): number {
   return props.Mass();
 }
 
-function fuseAll(oc: OpenCascadeInstance, shapes: TopoDsShape[]): TopoDsShape {
-  let acc = shapes[0]!;
-  for (let i = 1; i < shapes.length; i++) {
-    const fuse = new oc.BRepAlgoAPI_Fuse_3(acc, shapes[i]!);
-    fuse.Build();
-    if (!fuse.IsDone()) throw new Error("Boolean fuse failed");
-    acc = fuse.Shape();
-  }
-  return acc;
-}
-
 function intersects(oc: OpenCascadeInstance, a: TopoDsShape, b: TopoDsShape): boolean {
   const common = new oc.BRepAlgoAPI_Common_3(a, b);
   common.Build();
   if (!common.IsDone()) return false;
   return Math.abs(shapeVolume(oc, common.Shape())) > 1e-9;
+}
+
+// ------------------------------------------------------ named sweeps (D2)
+
+/** A tool body carrying its own D2 name table. */
+interface NamedTool {
+  shape: TopoDsShape;
+  names: TopoNames;
+  report: NamingReport;
+}
+
+const zeroReport = (): NamingReport => ({ orphanFaces: 0, orphanEdges: 0 });
+
+/**
+ * Names one swept solid (prism/revolve of one keyed profile face) per doc
+ * §3.4: caps from FirstShape/LastShape → `start`/`end`, side faces from
+ * Generated(profileEdge) → `side(curveKey)`, start-cap edges via IsSame with
+ * the profile wire → `cap(start,key)`. For prisms, end-cap and lateral edges
+ * are derived from the sweep vector (exact arithmetic on the known profile
+ * endpoints — mint-time construction, not resolve-time guessing), keeping
+ * every box edge stably named so fillet refs survive dimension edits.
+ */
+function nameSweep(opts: {
+  oc: OpenCascadeInstance;
+  featureId: string;
+  builder: SweepMaker;
+  shape: TopoDsShape;
+  keyed: KeyedFace;
+  sweepVec: [number, number, number] | null;
+  mintCaps: boolean;
+  capSuffix: string;
+}): { names: TopoNames; report: NamingReport } {
+  const { oc, featureId, builder, shape, keyed } = opts;
+  const faceSeeds: NamedShape[] = [];
+  const edgeSeeds: NamedShape[] = [];
+
+  if (opts.mintCaps) {
+    // Doc §7.3: never query caps at 360° — callers pass mintCaps=false there.
+    const start = builder.FirstShape();
+    const end = builder.LastShape();
+    if (!start.IsNull()) {
+      faceSeeds.push({ shape: start, name: `${featureId}/face/start${opts.capSuffix}` });
+    }
+    if (!end.IsNull()) {
+      faceSeeds.push({ shape: end, name: `${featureId}/face/end${opts.capSuffix}` });
+    }
+  }
+
+  for (const ke of keyed.edges) {
+    // Consume-once history: Generated is queried exactly once per edge here.
+    try {
+      const drained: TopoDsShape[] = [];
+      const list = builder.Generated(ke.edge);
+      while (list.Size() > 0) {
+        drained.push(list.First_1());
+        list.RemoveFirst();
+      }
+      const real = drained.filter((s) => !s.IsNull());
+      real.forEach((sideFace, i) => {
+        const mark = real.length > 1 ? `;s${i}of${real.length}` : "";
+        faceSeeds.push({ shape: sideFace, name: `${featureId}/face/side(${ke.key})${mark}` });
+      });
+    } catch {
+      // No history for this edge — its side face takes the orphan path.
+    }
+    // The profile wire's own edges survive into the solid as start-cap edges.
+    edgeSeeds.push({ shape: ke.edge, name: `${featureId}/edge/cap(start,${ke.key})` });
+  }
+
+  // Prism-only: derive end-cap and lateral edge names from the sweep vector.
+  if (opts.sweepVec) {
+    const vec = opts.sweepVec;
+    const near = (p: [number, number, number], q: [number, number, number]) =>
+      Math.abs(p[0] - q[0]) < 1e-4 && Math.abs(p[1] - q[1]) < 1e-4 && Math.abs(p[2] - q[2]) < 1e-4;
+    for (const newEdge of collectUniqueEdges(oc, shape)) {
+      const c = shapeCentroidOf(oc, newEdge);
+      let claimed = false;
+      for (const ke of keyed.edges) {
+        const keCentroid = shapeCentroidOf(oc, ke.edge);
+        if (near(c, ADD(keCentroid, vec))) {
+          edgeSeeds.push({ shape: newEdge, name: `${featureId}/edge/cap(end,${ke.key})` });
+          claimed = true;
+          break;
+        }
+      }
+      if (claimed) continue;
+      for (const ke of keyed.edges) {
+        if (!ke.a) continue;
+        if (near(c, ADD(ke.a, V(vec, 0.5)))) {
+          edgeSeeds.push({ shape: newEdge, name: `${featureId}/edge/lat(${ke.key})` });
+          break;
+        }
+      }
+    }
+  }
+
+  return nameFromHistory({
+    oc,
+    featureId,
+    newShape: shape,
+    oldFaces: [],
+    oldEdges: [],
+    histories: [],
+    faceSeeds,
+    edgeSeeds,
+  });
+}
+
+/** Edge/face centroid used by sweep edge derivation (thin wrapper, cached in naming.ts). */
+function shapeCentroidOf(oc: OpenCascadeInstance, edge: TopoDsShape): [number, number, number] {
+  const props = new oc.GProp_GProps_1();
+  oc.BRepGProp.LinearProperties(edge, props, false, false);
+  const c = props.CentreOfMass();
+  return [c.X(), c.Y(), c.Z()];
+}
+
+/** Fuses named tools pairwise, carrying names through each fuse's history. */
+function fuseNamedTools(oc: OpenCascadeInstance, featureId: string, tools: NamedTool[]): NamedTool {
+  let acc = tools[0]!;
+  for (let i = 1; i < tools.length; i++) {
+    const next = tools[i]!;
+    const fuse = new oc.BRepAlgoAPI_Fuse_3(acc.shape, next.shape);
+    fuse.Build();
+    if (!fuse.IsDone()) throw new Error("Boolean fuse failed");
+    const shape = fuse.Shape();
+    const accInputs = namedInputs(oc, acc.shape, acc.names);
+    const nextInputs = namedInputs(oc, next.shape, next.names);
+    const { names, report } = nameFromHistory({
+      oc,
+      featureId,
+      newShape: shape,
+      oldFaces: [...accInputs.faces, ...nextInputs.faces],
+      oldEdges: [...accInputs.edges, ...nextInputs.edges],
+      histories: [fuse],
+    });
+    acc = {
+      shape,
+      names,
+      report: {
+        orphanFaces: acc.report.orphanFaces + next.report.orphanFaces + report.orphanFaces,
+        orphanEdges: acc.report.orphanEdges + next.report.orphanEdges + report.orphanEdges,
+      },
+    };
+  }
+  return acc;
+}
+
+/** Applies a named tool to the model per the feature's operation, carrying
+ * name lineage from both parents through the boolean's history. */
+function applyNamedTool(
+  oc: OpenCascadeInstance,
+  featureId: string,
+  operation: ExtrudeFeature["operation"],
+  tool: NamedTool,
+  state: RegenState,
+): void {
+  const combine = (
+    body: RegenBody,
+    op: "fuse" | "cut",
+  ): { shape: TopoDsShape; names: TopoNames; report: NamingReport } => {
+    const builder =
+      op === "fuse"
+        ? new oc.BRepAlgoAPI_Fuse_3(body.shape, tool.shape)
+        : new oc.BRepAlgoAPI_Cut_3(body.shape, tool.shape);
+    builder.Build();
+    if (!builder.IsDone()) throw new Error(op === "fuse" ? "Join failed" : "Cut failed");
+    const shape = builder.Shape();
+    const bodyInputs = namedInputs(oc, body.shape, body.names);
+    const toolInputs = namedInputs(oc, tool.shape, tool.names);
+    const { names, report } = nameFromHistory({
+      oc,
+      featureId,
+      newShape: shape,
+      oldFaces: [...bodyInputs.faces, ...toolInputs.faces],
+      oldEdges: [...bodyInputs.edges, ...toolInputs.edges],
+      histories: [builder],
+    });
+    return { shape, names, report };
+  };
+
+  switch (operation) {
+    case "new": {
+      state.bodies.push({
+        id: featureId,
+        shape: tool.shape,
+        names: tool.names,
+        volume: shapeVolume(oc, tool.shape),
+      });
+      warnOrphans(state, featureId, tool.report);
+      break;
+    }
+    case "join": {
+      const target = state.bodies.find((b) => intersects(oc, b.shape, tool.shape));
+      if (!target) {
+        // Nothing to join with — behave like a new body (Fusion does the same).
+        state.bodies.push({
+          id: featureId,
+          shape: tool.shape,
+          names: tool.names,
+          volume: shapeVolume(oc, tool.shape),
+        });
+        warnOrphans(state, featureId, tool.report);
+        break;
+      }
+      const merged = combine(target, "fuse");
+      target.shape = merged.shape;
+      target.names = merged.names;
+      target.volume = shapeVolume(oc, target.shape);
+      warnOrphans(state, featureId, merged.report);
+      break;
+    }
+    case "cut": {
+      if (state.bodies.length === 0) throw new Error("Nothing to cut — no bodies yet");
+      let cutAny = false;
+      for (const body of state.bodies) {
+        if (!intersects(oc, body.shape, tool.shape)) continue;
+        const cut = combine(body, "cut");
+        body.shape = cut.shape;
+        body.names = cut.names;
+        body.volume = shapeVolume(oc, body.shape);
+        warnOrphans(state, featureId, cut.report);
+        cutAny = true;
+      }
+      if (!cutAny) throw new Error("Cut tool does not intersect any body");
+      break;
+    }
+  }
 }
 
 function executeExtrude(
@@ -571,105 +930,89 @@ function executeExtrude(
   const distance = evaluateExpression(feature.distance, env);
   if (distance <= 0) throw new Error("Extrude distance must be > 0");
 
-  const faces = buildProfileFaces(oc, sketch, feature.profileIds);
   const n = sketch.plane.normal;
 
-  const makeTool = (
-    vec: [number, number, number],
-    shift: [number, number, number],
-  ): TopoDsShape => {
+  const makeTool = (vec: [number, number, number], shift: [number, number, number]): NamedTool => {
     // shift is applied by rebuilding the sketch plane origin — used for symmetric.
     const shifted: EvaluatedSketch = {
       ...sketch,
       plane: { ...sketch.plane, origin: ADD(sketch.plane.origin, shift) },
     };
-    const shiftedFaces =
-      shift[0] === 0 && shift[1] === 0 && shift[2] === 0
-        ? faces
-        : buildProfileFaces(oc, shifted, feature.profileIds);
-    const prisms = shiftedFaces.map((f) =>
-      new oc.BRepPrimAPI_MakePrism_1(
-        f,
+    const keyedFaces = buildKeyedFaces(oc, shifted, feature.profileIds);
+    const prisms = keyedFaces.map((keyed, k) => {
+      const builder = new oc.BRepPrimAPI_MakePrism_1(
+        keyed.face,
         new oc.gp_Vec_4(vec[0], vec[1], vec[2]),
         false,
         true,
-      ).Shape(),
-    );
-    return fuseAll(oc, prisms);
+      );
+      const shape = builder.Shape();
+      const capSuffix = keyedFaces.length > 1 ? `;s${k}of${keyedFaces.length}` : "";
+      const { names, report } = nameSweep({
+        oc,
+        featureId: feature.id,
+        builder,
+        shape,
+        keyed,
+        sweepVec: vec,
+        mintCaps: true,
+        capSuffix,
+      });
+      return { shape, names, report };
+    });
+    return fuseNamedTools(oc, feature.id, prisms);
   };
 
-  let tool: TopoDsShape;
+  let tool: NamedTool;
   if (feature.direction === "normal") tool = makeTool(V(n, distance), [0, 0, 0]);
   else if (feature.direction === "reversed") tool = makeTool(V(n, -distance), [0, 0, 0]);
   else tool = makeTool(V(n, distance), V(n, -distance / 2));
 
-  switch (feature.operation) {
-    case "new": {
-      state.bodies.push({ id: feature.id, shape: tool, volume: shapeVolume(oc, tool) });
-      break;
-    }
-    case "join": {
-      const target = state.bodies.find((b) => intersects(oc, b.shape, tool));
-      if (!target) {
-        // Nothing to join with — behave like a new body (Fusion does the same).
-        state.bodies.push({ id: feature.id, shape: tool, volume: shapeVolume(oc, tool) });
-        break;
-      }
-      const fuse = new oc.BRepAlgoAPI_Fuse_3(target.shape, tool);
-      fuse.Build();
-      if (!fuse.IsDone()) throw new Error("Join failed");
-      target.shape = fuse.Shape();
-      target.volume = shapeVolume(oc, target.shape);
-      break;
-    }
-    case "cut": {
-      if (state.bodies.length === 0) throw new Error("Nothing to cut — no bodies yet");
-      let cutAny = false;
-      for (const body of state.bodies) {
-        if (!intersects(oc, body.shape, tool)) continue;
-        const cut = new oc.BRepAlgoAPI_Cut_3(body.shape, tool);
-        cut.Build();
-        if (!cut.IsDone()) throw new Error("Cut failed");
-        body.shape = cut.Shape();
-        body.volume = shapeVolume(oc, body.shape);
-        cutAny = true;
-      }
-      if (!cutAny) throw new Error("Cut tool does not intersect any body");
-      break;
-    }
+  applyNamedTool(oc, feature.id, feature.operation, tool, state);
+}
+
+// ---------------------------------------------------------------- ref resolution (D2)
+
+/** A ref as it may appear in a document: v2 name, or v1 legacy index. */
+type AnyRef = { bodyId: string; name?: string; edgeIndex?: number; faceIndex?: number };
+
+/**
+ * Resolves a face/edge reference against a body's current name table.
+ * v2 name refs go through the loud-failure name lookup; v1 legacy index refs
+ * are honored only to bootstrap the upgrade regen, which rewrites them to
+ * names via `rewrite` as they resolve (doc §2.4 — never guess, only capture).
+ */
+function resolveTopoRef(
+  state: RegenState,
+  body: RegenBody,
+  ref: AnyRef,
+  kind: "face" | "edge",
+  rewrite: (name: string) => void,
+): number {
+  if (typeof ref.name === "string") {
+    const result = resolveName(body.names, kind, ref.name);
+    if (!result.ok) throw new Error(describeResolveFailure(result.reason, kind));
+    return result.index;
   }
+  const legacyIndex = kind === "face" ? ref.faceIndex : ref.edgeIndex;
+  if (typeof legacyIndex !== "number") throw new Error(`Malformed ${kind} reference`);
+  const table = kind === "face" ? body.names.faceNames : body.names.edgeNames;
+  const name = table[legacyIndex];
+  if (name === undefined) {
+    throw new Error(`Referenced ${kind} #${legacyIndex} no longer exists — re-pick it`);
+  }
+  if (state.upgradeTarget) rewrite(name);
+  return legacyIndex;
+}
+
+/** Rewrites one legacy ref object in the upgrade-target document in place. */
+function upgradeRef(ref: AnyRef, name: string): void {
+  ref.name = name;
+  delete ref.edgeIndex;
+  delete ref.faceIndex;
 }
 
 // ---------------------------------------------------------------- fillet
-
-export function collectFaces(oc: OpenCascadeInstance, shape: TopoDsShape): TopoDsFace[] {
-  const faces: TopoDsFace[] = [];
-  const exp = new oc.TopExp_Explorer_2(
-    shape,
-    oc.TopAbs_ShapeEnum.TopAbs_FACE,
-    oc.TopAbs_ShapeEnum.TopAbs_SHAPE,
-  );
-  while (exp.More()) {
-    faces.push(oc.TopoDS.Face_1(exp.Current()));
-    exp.Next();
-  }
-  return faces;
-}
-
-export function collectUniqueEdges(oc: OpenCascadeInstance, shape: TopoDsShape): TopoDsEdge[] {
-  const edges: TopoDsEdge[] = [];
-  const exp = new oc.TopExp_Explorer_2(
-    shape,
-    oc.TopAbs_ShapeEnum.TopAbs_EDGE,
-    oc.TopAbs_ShapeEnum.TopAbs_SHAPE,
-  );
-  while (exp.More()) {
-    const e = exp.Current();
-    if (!edges.some((u) => u.IsSame(e))) edges.push(oc.TopoDS.Edge_1(e));
-    exp.Next();
-  }
-  return edges;
-}
 
 function executeFillet(
   oc: OpenCascadeInstance,
@@ -681,79 +1024,48 @@ function executeFillet(
   if (radius <= 0) throw new Error("Fillet radius must be > 0");
   if (feature.edges.length === 0) throw new Error("Fillet has no edges selected");
 
-  const byBody = new Map<string, number[]>();
+  const byBody = new Map<string, AnyRef[]>();
   for (const ref of feature.edges) {
     const list = byBody.get(ref.bodyId) ?? [];
-    list.push(ref.edgeIndex);
+    list.push(ref);
     byBody.set(ref.bodyId, list);
   }
 
-  for (const [bodyId, edgeIndices] of byBody) {
+  for (const [bodyId, refs] of byBody) {
     const body = state.bodies.find((b) => b.id === bodyId);
     if (!body) throw new Error(`Fillet references missing body ${bodyId}`);
     const edges = collectUniqueEdges(oc, body.shape);
+    const before = namedInputs(oc, body.shape, body.names);
     const fillet = new oc.BRepFilletAPI_MakeFillet(
       body.shape,
       oc.ChFi3d_FilletShape.ChFi3d_Rational,
     );
-    for (const index of edgeIndices) {
-      const edge = edges[index];
-      if (!edge) throw new Error(`Fillet references missing edge #${index}`);
-      fillet.Add_2(radius, edge);
+    for (const ref of refs) {
+      const index = resolveTopoRef(state, body, ref, "edge", (name) => upgradeRef(ref, name));
+      fillet.Add_2(radius, edges[index]!);
     }
     fillet.Build();
     if (!fillet.IsDone()) {
       throw new Error(`Fillet failed — radius ${radius} may exceed adjacent face size`);
     }
-    body.shape = fillet.Shape();
+    const shape = fillet.Shape();
+    const { names, report } = nameFromHistory({
+      oc,
+      featureId: feature.id,
+      newShape: shape,
+      oldFaces: before.faces,
+      oldEdges: before.edges,
+      histories: [fillet],
+    });
+    body.shape = shape;
+    body.names = names;
     body.volume = shapeVolume(oc, body.shape);
+    warnOrphans(state, feature.id, report);
   }
+  warnSplitRefs(state, feature.id, feature.edges);
 }
 
 // ---------------------------------------------------------------- revolve
-
-function applyToolOperation(
-  oc: OpenCascadeInstance,
-  featureId: string,
-  operation: ExtrudeFeature["operation"],
-  tool: TopoDsShape,
-  state: RegenState,
-): void {
-  switch (operation) {
-    case "new": {
-      state.bodies.push({ id: featureId, shape: tool, volume: shapeVolume(oc, tool) });
-      break;
-    }
-    case "join": {
-      const target = state.bodies.find((b) => intersects(oc, b.shape, tool));
-      if (!target) {
-        state.bodies.push({ id: featureId, shape: tool, volume: shapeVolume(oc, tool) });
-        break;
-      }
-      const fuse = new oc.BRepAlgoAPI_Fuse_3(target.shape, tool);
-      fuse.Build();
-      if (!fuse.IsDone()) throw new Error("Join failed");
-      target.shape = fuse.Shape();
-      target.volume = shapeVolume(oc, target.shape);
-      break;
-    }
-    case "cut": {
-      if (state.bodies.length === 0) throw new Error("Nothing to cut — no bodies yet");
-      let cutAny = false;
-      for (const body of state.bodies) {
-        if (!intersects(oc, body.shape, tool)) continue;
-        const cut = new oc.BRepAlgoAPI_Cut_3(body.shape, tool);
-        cut.Build();
-        if (!cut.IsDone()) throw new Error("Cut failed");
-        body.shape = cut.Shape();
-        body.volume = shapeVolume(oc, body.shape);
-        cutAny = true;
-      }
-      if (!cutAny) throw new Error("Cut tool does not intersect any body");
-      break;
-    }
-  }
-}
 
 function executeRevolve(
   oc: OpenCascadeInstance,
@@ -767,7 +1079,7 @@ function executeRevolve(
   const angleDeg = evaluateExpression(feature.angle, env);
   if (angleDeg <= 0 || angleDeg > 360) throw new Error("Revolve angle must be in (0, 360]");
 
-  const faces = buildProfileFaces(oc, sketch, feature.profileIds);
+  const keyedFaces = buildKeyedFaces(oc, sketch, feature.profileIds);
   const { origin, xdir, ydir } = sketch.plane;
   const axisDir = feature.axis === "x" ? xdir : ydir;
   const axis = new oc.gp_Ax1_2(
@@ -775,11 +1087,31 @@ function executeRevolve(
     new oc.gp_Dir_4(axisDir[0], axisDir[1], axisDir[2]),
   );
 
-  const solids = faces.map((f) =>
-    new oc.BRepPrimAPI_MakeRevol_1(f, axis, (angleDeg * Math.PI) / 180, true).Shape(),
-  );
-  const tool = fuseAll(oc, solids);
-  applyToolOperation(oc, feature.id, feature.operation, tool, state);
+  const solids = keyedFaces.map((keyed, k) => {
+    const builder = new oc.BRepPrimAPI_MakeRevol_1(
+      keyed.face,
+      axis,
+      (angleDeg * Math.PI) / 180,
+      true,
+    );
+    const shape = builder.Shape();
+    const capSuffix = keyedFaces.length > 1 ? `;s${k}of${keyedFaces.length}` : "";
+    const { names, report } = nameSweep({
+      oc,
+      featureId: feature.id,
+      builder,
+      shape,
+      keyed,
+      sweepVec: null,
+      // Probe finding (doc §7.3): at 360° FirstShape returns a non-null shape
+      // even though there are no caps — never mint start/end names there.
+      mintCaps: angleDeg < 360,
+      capSuffix,
+    });
+    return { shape, names, report };
+  });
+  const tool = fuseNamedTools(oc, feature.id, solids);
+  applyNamedTool(oc, feature.id, feature.operation, tool, state);
 }
 
 // ---------------------------------------------------------------- chamfer
@@ -794,30 +1126,42 @@ function executeChamfer(
   if (distance <= 0) throw new Error("Chamfer distance must be > 0");
   if (feature.edges.length === 0) throw new Error("Chamfer has no edges selected");
 
-  const byBody = new Map<string, number[]>();
+  const byBody = new Map<string, AnyRef[]>();
   for (const ref of feature.edges) {
     const list = byBody.get(ref.bodyId) ?? [];
-    list.push(ref.edgeIndex);
+    list.push(ref);
     byBody.set(ref.bodyId, list);
   }
 
-  for (const [bodyId, edgeIndices] of byBody) {
+  for (const [bodyId, refs] of byBody) {
     const body = state.bodies.find((b) => b.id === bodyId);
     if (!body) throw new Error(`Chamfer references missing body ${bodyId}`);
     const edges = collectUniqueEdges(oc, body.shape);
+    const before = namedInputs(oc, body.shape, body.names);
     const chamfer = new oc.BRepFilletAPI_MakeChamfer(body.shape);
-    for (const index of edgeIndices) {
-      const edge = edges[index];
-      if (!edge) throw new Error(`Chamfer references missing edge #${index}`);
-      chamfer.Add_2(distance, edge);
+    for (const ref of refs) {
+      const index = resolveTopoRef(state, body, ref, "edge", (name) => upgradeRef(ref, name));
+      chamfer.Add_2(distance, edges[index]!);
     }
     chamfer.Build();
     if (!chamfer.IsDone()) {
       throw new Error(`Chamfer failed — distance ${distance} may exceed adjacent face size`);
     }
-    body.shape = chamfer.Shape();
+    const shape = chamfer.Shape();
+    const { names, report } = nameFromHistory({
+      oc,
+      featureId: feature.id,
+      newShape: shape,
+      oldFaces: before.faces,
+      oldEdges: before.edges,
+      histories: [chamfer],
+    });
+    body.shape = shape;
+    body.names = names;
     body.volume = shapeVolume(oc, body.shape);
+    warnOrphans(state, feature.id, report);
   }
+  warnSplitRefs(state, feature.id, feature.edges);
 }
 
 // ---------------------------------------------------------------- shell
@@ -840,11 +1184,13 @@ function executeShell(
   if (!body) throw new Error(`Shell references missing body ${bodyId}`);
 
   const faces = collectFaces(oc, body.shape);
+  const before = namedInputs(oc, body.shape, body.names);
   const closing = new oc.TopTools_ListOfShape_1();
   for (const ref of feature.faces) {
-    const face = faces[ref.faceIndex];
-    if (!face) throw new Error(`Shell references missing face #${ref.faceIndex}`);
-    closing.Append_1(face);
+    const index = resolveTopoRef(state, body, ref as AnyRef, "face", (name) =>
+      upgradeRef(ref as AnyRef, name),
+    );
+    closing.Append_1(faces[index]!);
   }
 
   const thick = new oc.BRepOffsetAPI_MakeThickSolid_2(
@@ -859,8 +1205,22 @@ function executeShell(
     false,
   );
   if (!thick.IsDone()) throw new Error("Shell failed — thickness may be too large");
-  body.shape = thick.Shape();
+  const shape = thick.Shape();
+  // Probe finding: ThickSolid reports Generated(edge)→rim faces but nothing
+  // for offset inner faces — those take the orphan path (doc §3.4 shell row).
+  const { names, report } = nameFromHistory({
+    oc,
+    featureId: feature.id,
+    newShape: shape,
+    oldFaces: before.faces,
+    oldEdges: before.edges,
+    histories: [thick],
+  });
+  body.shape = shape;
+  body.names = names;
   body.volume = shapeVolume(oc, body.shape);
+  warnOrphans(state, feature.id, report);
+  warnSplitRefs(state, feature.id, feature.faces);
 }
 
 // ---------------------------------------------------------------- transforms
@@ -884,15 +1244,38 @@ function executeMirror(oc: OpenCascadeInstance, feature: MirrorFeature, state: R
   const trsf = new oc.gp_Trsf_1();
   trsf.SetMirror_3(new oc.gp_Ax2_3(new oc.gp_Pnt_3(0, 0, 0), new oc.gp_Dir_4(n[0], n[1], n[2])));
   const mirrored = new oc.BRepBuilderAPI_Transform_2(body.shape, trsf, true).Shape();
+  // Transforms preserve explorer order but not IsSame (probe) — explicit map.
+  const mirroredNames = nameByOrder(
+    body.names,
+    (old, kind) => `${feature.id}/${kind}/inst(0,${old})`,
+  );
 
   if (feature.merge) {
     const fuse = new oc.BRepAlgoAPI_Fuse_3(body.shape, mirrored);
     fuse.Build();
     if (!fuse.IsDone()) throw new Error("Mirror merge failed");
-    body.shape = fuse.Shape();
+    const shape = fuse.Shape();
+    const bodyInputs = namedInputs(oc, body.shape, body.names);
+    const copyInputs = namedInputs(oc, mirrored, mirroredNames);
+    const { names, report } = nameFromHistory({
+      oc,
+      featureId: feature.id,
+      newShape: shape,
+      oldFaces: [...bodyInputs.faces, ...copyInputs.faces],
+      oldEdges: [...bodyInputs.edges, ...copyInputs.edges],
+      histories: [fuse],
+    });
+    body.shape = shape;
+    body.names = names;
     body.volume = shapeVolume(oc, body.shape);
+    warnOrphans(state, feature.id, report);
   } else {
-    state.bodies.push({ id: feature.id, shape: mirrored, volume: shapeVolume(oc, mirrored) });
+    state.bodies.push({
+      id: feature.id,
+      shape: mirrored,
+      names: mirroredNames,
+      volume: shapeVolume(oc, mirrored),
+    });
   }
 }
 
@@ -910,16 +1293,23 @@ function executeLinearPattern(
   if (spacing === 0) throw new Error("Pattern spacing must be nonzero");
 
   const dir = AXIS_DIRS[feature.direction];
-  const copies: TopoDsShape[] = [body.shape];
+  const copies: NamedTool[] = [{ shape: body.shape, names: body.names, report: zeroReport() }];
   for (let i = 1; i < count; i++) {
     const trsf = new oc.gp_Trsf_1();
     trsf.SetTranslation_1(
       new oc.gp_Vec_4(dir[0] * spacing * i, dir[1] * spacing * i, dir[2] * spacing * i),
     );
-    copies.push(new oc.BRepBuilderAPI_Transform_2(body.shape, trsf, true).Shape());
+    copies.push({
+      shape: new oc.BRepBuilderAPI_Transform_2(body.shape, trsf, true).Shape(),
+      names: nameByOrder(body.names, (old, kind) => `${feature.id}/${kind}/inst(${i},${old})`),
+      report: zeroReport(),
+    });
   }
-  body.shape = fuseAll(oc, copies);
+  const fused = fuseNamedTools(oc, feature.id, copies);
+  body.shape = fused.shape;
+  body.names = fused.names;
   body.volume = shapeVolume(oc, body.shape);
+  warnOrphans(state, feature.id, fused.report);
 }
 
 function executeCircularPattern(
@@ -935,14 +1325,21 @@ function executeCircularPattern(
 
   const dir = AXIS_DIRS[feature.axis];
   const axis = new oc.gp_Ax1_2(new oc.gp_Pnt_3(0, 0, 0), new oc.gp_Dir_4(dir[0], dir[1], dir[2]));
-  const copies: TopoDsShape[] = [body.shape];
+  const copies: NamedTool[] = [{ shape: body.shape, names: body.names, report: zeroReport() }];
   for (let i = 1; i < count; i++) {
     const trsf = new oc.gp_Trsf_1();
     trsf.SetRotation_1(axis, (i * 2 * Math.PI) / count);
-    copies.push(new oc.BRepBuilderAPI_Transform_2(body.shape, trsf, true).Shape());
+    copies.push({
+      shape: new oc.BRepBuilderAPI_Transform_2(body.shape, trsf, true).Shape(),
+      names: nameByOrder(body.names, (old, kind) => `${feature.id}/${kind}/inst(${i},${old})`),
+      report: zeroReport(),
+    });
   }
-  body.shape = fuseAll(oc, copies);
+  const fused = fuseNamedTools(oc, feature.id, copies);
+  body.shape = fused.shape;
+  body.names = fused.names;
   body.volume = shapeVolume(oc, body.shape);
+  warnOrphans(state, feature.id, fused.report);
 }
 
 function executeBoolean(oc: OpenCascadeInstance, feature: BooleanFeature, state: RegenState): void {
@@ -960,8 +1357,23 @@ function executeBoolean(oc: OpenCascadeInstance, feature: BooleanFeature, state:
         : new oc.BRepAlgoAPI_Common_3(target.shape, toolBody.shape);
   op.Build();
   if (!op.IsDone()) throw new Error(`Combine ${feature.op} failed`);
-  target.shape = op.Shape();
+  const shape = op.Shape();
+  // Both parents' names feed the result — tool-body lineage survives into
+  // the combined body (doc §3.4 boolean row).
+  const targetInputs = namedInputs(oc, target.shape, target.names);
+  const toolInputs = namedInputs(oc, toolBody.shape, toolBody.names);
+  const { names, report } = nameFromHistory({
+    oc,
+    featureId: feature.id,
+    newShape: shape,
+    oldFaces: [...targetInputs.faces, ...toolInputs.faces],
+    oldEdges: [...targetInputs.edges, ...toolInputs.edges],
+    histories: [op],
+  });
+  target.shape = shape;
+  target.names = names;
   target.volume = shapeVolume(oc, target.shape);
+  warnOrphans(state, feature.id, report);
   // Tool body is consumed.
   state.bodies = state.bodies.filter((b) => b !== toolBody);
 }
@@ -995,7 +1407,150 @@ function executeMove(
     shape = new oc.BRepBuilderAPI_Transform_2(shape, tr, false).Shape();
   }
   body.shape = shape;
+  // Transforms relocate without topology change: every name carries over
+  // verbatim by explorer order (probe: order preserved, IsSame is not).
   body.volume = shapeVolume(oc, body.shape);
+}
+
+// ---------------------------------------------------------------- joint (D6)
+
+type V3 = [number, number, number];
+
+/** Deterministic unit perpendicular to z: project the world axis least
+ * aligned with z (doc §2 — same rule every regen, so frames reproduce). */
+function perpendicularOf(z: V3): V3 {
+  const axes: V3[] = [
+    [1, 0, 0],
+    [0, 1, 0],
+    [0, 0, 1],
+  ];
+  let best = axes[0]!;
+  let bestDot = Infinity;
+  for (const a of axes) {
+    const d = Math.abs(a[0] * z[0] + a[1] * z[1] + a[2] * z[2]);
+    if (d < bestDot) {
+      bestDot = d;
+      best = a;
+    }
+  }
+  const dot = best[0] * z[0] + best[1] * z[1] + best[2] * z[2];
+  const p: V3 = [best[0] - dot * z[0], best[1] - dot * z[1], best[2] - dot * z[2]];
+  const len = Math.hypot(p[0], p[1], p[2]);
+  return [p[0] / len, p[1] / len, p[2] / len];
+}
+
+/** Rodrigues rotation of v about unit axis k by angle (radians). */
+function rotateAbout(v: V3, k: V3, angle: number): V3 {
+  const c = Math.cos(angle);
+  const s = Math.sin(angle);
+  const dot = k[0] * v[0] + k[1] * v[1] + k[2] * v[2];
+  const cross: V3 = [
+    k[1] * v[2] - k[2] * v[1],
+    k[2] * v[0] - k[0] * v[2],
+    k[0] * v[1] - k[1] * v[0],
+  ];
+  return [
+    v[0] * c + cross[0] * s + k[0] * dot * (1 - c),
+    v[1] * c + cross[1] * s + k[1] * dot * (1 - c),
+    v[2] * c + cross[2] * s + k[2] * dot * (1 - c),
+  ];
+}
+
+interface JointFrame {
+  origin: V3;
+  z: V3;
+  x: V3;
+}
+
+/** Derives the mate frame from a picked planar face (centroid/normal/x) or
+ * circular edge (center/axis/deterministic perpendicular) — doc §2. */
+function jointFrame(
+  oc: OpenCascadeInstance,
+  state: RegenState,
+  body: RegenBody,
+  ref: JointRef,
+): JointFrame {
+  if (ref.kind === "face") {
+    const faces = collectFaces(oc, body.shape);
+    const index = resolveTopoRef(state, body, ref as AnyRef, "face", (name) =>
+      upgradeRef(ref as AnyRef, name),
+    );
+    const face = faces[index]!;
+    const surf = new oc.BRepAdaptor_Surface_2(face, true);
+    if (surf.GetType().value !== oc.GeomAbs_SurfaceType.GeomAbs_Plane.value) {
+      throw new Error("Joint: pick a planar face or circular edge");
+    }
+    const pln = surf.Plane();
+    let n = pln.Axis().Direction();
+    if (face.Orientation_1().value === oc.TopAbs_Orientation.TopAbs_REVERSED.value) {
+      n = n.Reversed();
+    }
+    const xd = pln.Position().XDirection();
+    return {
+      // Centroid, not gp_Pln.Location() — the latter is an arbitrary point
+      // of the infinite plane.
+      origin: shapeCentroid(oc, face, "face"),
+      z: [n.X(), n.Y(), n.Z()],
+      x: [xd.X(), xd.Y(), xd.Z()],
+    };
+  }
+  const edges = collectUniqueEdges(oc, body.shape);
+  const index = resolveTopoRef(state, body, ref as AnyRef, "edge", (name) =>
+    upgradeRef(ref as AnyRef, name),
+  );
+  const edge = edges[index]!;
+  const curve = new oc.BRepAdaptor_Curve_2(edge);
+  if (curve.GetType().value !== oc.GeomAbs_CurveType.GeomAbs_Circle.value) {
+    throw new Error("Joint: pick a planar face or circular edge");
+  }
+  const circ = curve.Circle();
+  const loc = circ.Location();
+  const ax = circ.Axis().Direction();
+  const z: V3 = [ax.X(), ax.Y(), ax.Z()];
+  return { origin: [loc.X(), loc.Y(), loc.Z()], z, x: perpendicularOf(z) };
+}
+
+/**
+ * Assembly joint (D6): closed-form placement of the moving body so its mate
+ * frame lands on the target's effective frame — origin offset along target z,
+ * x rotated by `angle` about target z, z anti-aligned unless `flip`
+ * (doc §3). Static placement is identical for all four joint types; the type
+ * gates which parameters the drag solve may vary (M7 UI).
+ */
+function executeJoint(
+  oc: OpenCascadeInstance,
+  feature: JointFeature,
+  state: RegenState,
+  env: (name: string) => number,
+): void {
+  const moving = state.bodies.find((b) => b.id === feature.movingRef.bodyId);
+  const target = state.bodies.find((b) => b.id === feature.targetRef.bodyId);
+  if (!moving) throw new Error(`Joint references missing body ${feature.movingRef.bodyId}`);
+  if (!target) throw new Error(`Joint references missing body ${feature.targetRef.bodyId}`);
+  if (moving === target) throw new Error("Joint: moving and target must be different bodies");
+  const offset = evaluateExpression(feature.offset, env);
+  const angleRad = (evaluateExpression(feature.angle, env) * Math.PI) / 180;
+
+  const m = jointFrame(oc, state, moving, feature.movingRef);
+  const t = jointFrame(oc, state, target, feature.targetRef);
+
+  const origin = ADD(t.origin, V(t.z, offset));
+  const zEff: V3 = feature.flip ? t.z : [-t.z[0], -t.z[1], -t.z[2]];
+  const xEff = rotateAbout(t.x, t.z, angleRad);
+
+  const P = (v: V3): GpPnt => new oc.gp_Pnt_3(v[0], v[1], v[2]);
+  const D = (v: V3): GpDir => new oc.gp_Dir_4(v[0], v[1], v[2]);
+  const trsf = new oc.gp_Trsf_1();
+  // Probe-verified: SetDisplacement(from, to) carries geometry from `from`
+  // onto `to`; gp_Ax3_3 re-orthonormalizes into a right-handed frame.
+  trsf.SetDisplacement(
+    new oc.gp_Ax3_3(P(m.origin), D(m.z), D(m.x)),
+    new oc.gp_Ax3_3(P(origin), D(zEff), D(xEff)),
+  );
+  moving.shape = new oc.BRepBuilderAPI_Transform_2(moving.shape, trsf, false).Shape();
+  // Names carry over verbatim in explorer order — same rule as move.
+  moving.volume = shapeVolume(oc, moving.shape);
+  warnSplitRefs(state, feature.id, [feature.movingRef, feature.targetRef]);
 }
 
 // ---------------------------------------------------------------- import
@@ -1023,7 +1578,14 @@ function executeImportStep(
     reader.TransferRoots();
     if (reader.NbShapes() === 0) throw new Error("STEP file contains no shapes");
     const shape = reader.OneShape();
-    state.bodies.push({ id: feature.id, shape, volume: shapeVolume(oc, shape) });
+    state.bodies.push({
+      id: feature.id,
+      shape,
+      // No history exists for imports; names are exploration ordinals, which
+      // are deterministic because the embedded STEP bytes are immutable.
+      names: nameByOrdinal(oc, feature.id, shape, "imp"),
+      volume: shapeVolume(oc, shape),
+    });
   } finally {
     try {
       oc.FS.unlink(path);
@@ -1033,5 +1595,23 @@ function executeImportStep(
   }
 }
 
-// Re-exported so worker code can resolve edge refs for display if needed.
-export type { EdgeRef };
+// ---------------------------------------------------------------- upgrade (v1 → v2)
+
+/**
+ * One-time document upgrade (doc §2.4): regenerate a v1 document with legacy
+ * index semantics, capturing the topological name each index currently
+ * denotes and rewriting the refs in place. Features whose legacy refs fail
+ * to resolve stay un-migrated and carry an error status — never guessed.
+ */
+export function upgradeDocumentRefs(
+  oc: OpenCascadeInstance,
+  doc: CraftbitDocument,
+): { doc: CraftbitDocument; failures: string[] } {
+  const clone = JSON.parse(JSON.stringify(doc)) as CraftbitDocument;
+  const state = regenerateDocument(oc, clone, { upgrade: true });
+  clone.formatVersion = 2;
+  const failures = Object.entries(state.statuses)
+    .filter(([, s]) => s.level === "error")
+    .map(([id]) => id);
+  return { doc: clone, failures };
+}

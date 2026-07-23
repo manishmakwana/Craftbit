@@ -1,6 +1,8 @@
 # D2: Topological Naming Scheme
 
-Status: **finalized — Phase-0 probe passed 2026-07-13** (`packages/geometry-worker/test/naming-probe.test.ts`) · Milestone: M2 · Serves: spec §4.3, §6.4, §7.8
+Status: **implemented** (naming.ts + regen.ts; regression suite in
+`packages/geometry-worker/test/naming.test.ts`; Phase-0 probe passed 2026-07-13,
+`naming-probe.test.ts`) · Milestone: M2 · Serves: spec §4.3, §6.4, §7.8
 Depends on: D1 (worker RPC — names travel in tessellation payloads), the OCCT history API
 (`BRepBuilderAPI_MakeShape::Generated/Modified/IsDeleted`).
 
@@ -224,9 +226,12 @@ Algorithm (builder evidence):
    `evidence.seeds` → `featId/kind/gen(srcName)` (seeds use their given name directly,
    e.g. `side(curveKey)` — see §3.4 per-op tables).
 6. **Orphans:** any new subshape still unnamed → `featId/kind/new(j)` with `j` from
-   centroid sort of the orphan set; feature status becomes `warning` listing the count.
-   Orphans are resolvable names (stable while topology count is stable) but signal a
-   history gap to fix.
+   centroid sort of the orphan set. Orphans are resolvable names (stable while
+   topology count is stable) but signal a history gap. *Implementation refinement:*
+   only orphan **faces** downgrade the feature to `warning` — orphan **edges** are
+   recorded in the naming report but stay silent, because fresh fillet/chamfer/revolve
+   boundary edges orphan by construction (their faces are fully named) and warning on
+   every fillet would drown the signal users must not ignore (split refs, shell gaps).
 7. Build `faceNameByIndex`/`edgeNameByIndex` by walking the same explorer order
    tessellation uses.
 
@@ -430,9 +435,10 @@ on 2026-07-13; all 7 probes green). Findings and their design consequences:
    history lists as consume-once).
 2. **`MakeThickSolid` history is partial, as §3.4 anticipated:** `Generated(edge)` →
    rim faces **works** (1 rim shape per removed-face edge); `Modified(keptFace)`
-   returns **0 faces**, so offset inner faces get no lineage. Per §3.4/§4, inner faces
-   ship on the orphan path (`new(j)` + feature `warning`); rim faces get real
-   `gen(edgeName)` names.
+   returns **0 faces**. *Implementation finding (post-probe):* `Generated(keptFace)`
+   — which the probe did not try — **does** return the offset inner face, so inner
+   faces get real `gen(faceName)` lineage after all; the orphan path remains only as
+   the safety net.
 3. **`MakeRevol` caps: usable at 90°** (both caps non-null, `Generated(profileEdge)`
    works). Caveat: at 360°, `FirstShape()` returns a **non-null** shape rather than a
    null one — so the extruder-side rule is explicit: **never query/mint `start`/`end`

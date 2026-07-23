@@ -14,6 +14,7 @@ import {
   BooleanDialog,
   ChamferDialog,
   CircularPatternDialog,
+  JointDialog,
   LinearPatternDialog,
   MirrorDialog,
   MoveDialog,
@@ -122,6 +123,7 @@ export function App() {
         )}
         {dialog?.kind === "boolean" && <BooleanDialog featureId={dialog.featureId} />}
         {dialog?.kind === "move" && <MoveDialog featureId={dialog.featureId} />}
+        {dialog?.kind === "joint" && <JointDialog featureId={dialog.featureId} />}
         {dialog?.kind === "parameters" && <ParametersDialog />}
         {dialog?.kind === "export" && <ExportDialog />}
         {toast && (

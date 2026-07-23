@@ -31,8 +31,16 @@ export interface GpAx2 {
   readonly __gpAx2Brand: never;
 }
 
+/** Right- (or left-)handed coordinate system; joints probe-verified the
+ * point/z/x constructor and SetDisplacement semantics (dbg probe, D6 doc §3). */
+export interface GpAx3 {
+  readonly __gpAx3Brand: never;
+}
+
 export interface GpCirc {
-  readonly __gpCircBrand: never;
+  Location(): GpPnt;
+  Axis(): { Direction(): GpDir };
+  Radius(): number;
 }
 
 export interface GeomCurve {
@@ -57,6 +65,9 @@ export interface GpTrsf {
   SetTranslation_1(vec: GpVec): void;
   SetRotation_1(axis: GpAx1, angleRad: number): void;
   SetMirror_3(plane: GpAx2): void;
+  /** Rigid motion carrying geometry from frame `from` onto frame `to`
+   * (probe-verified: (0,0,1) in a world frame lands at to.origin + to.z). */
+  SetDisplacement(from: GpAx3, to: GpAx3): void;
 }
 
 export interface TopLocLocation {
@@ -116,25 +127,43 @@ export interface ShapeMaker {
   Shape(): TopoDsShape;
 }
 
+/**
+ * OCCT history surface shared by BRepBuilderAPI_MakeShape descendants.
+ * Probe-verified (naming-probe.test.ts): lists drain destructively via
+ * Size() + First_1() + RemoveFirst() — treat every returned list as
+ * consume-once.
+ */
+export interface ShapeHistory {
+  Generated(s: TopoDsShape): TopToolsListOfShape;
+  Modified(s: TopoDsShape): TopToolsListOfShape;
+  IsDeleted(s: TopoDsShape): boolean;
+}
+
+/** Sweep builders additionally expose the two cap faces. */
+export interface SweepMaker extends ShapeMaker, ShapeHistory {
+  FirstShape(): TopoDsShape;
+  LastShape(): TopoDsShape;
+}
+
 export interface GPropGProps {
   Mass(): number;
   CentreOfMass(): GpPnt;
 }
 
-export interface BRepAlgoApiBoolean {
+export interface BRepAlgoApiBoolean extends ShapeHistory {
   Build(): void;
   IsDone(): boolean;
   Shape(): TopoDsShape;
 }
 
-export interface BRepFilletApiMakeFillet {
+export interface BRepFilletApiMakeFillet extends ShapeHistory {
   Add_2(radius: number, edge: TopoDsEdge): void;
   Build(): void;
   IsDone(): boolean;
   Shape(): TopoDsShape;
 }
 
-export interface BRepFilletApiMakeChamfer {
+export interface BRepFilletApiMakeChamfer extends ShapeHistory {
   Add_2(distance: number, edge: TopoDsEdge): void;
   Build(): void;
   IsDone(): boolean;
@@ -144,12 +173,17 @@ export interface BRepFilletApiMakeChamfer {
 export interface TopToolsListOfShape {
   Append_1(shape: TopoDsShape): void;
   Size(): number;
+  First_1(): TopoDsShape;
+  RemoveFirst(): void;
 }
 
 export interface BRepAdaptorCurve {
   FirstParameter(): number;
   LastParameter(): number;
   Value(u: number): GpPnt;
+  GetType(): { value: number };
+  /** Only valid when GetType() is GeomAbs_Circle (probe-verified). */
+  Circle(): GpCirc;
 }
 
 export interface BRepAdaptorSurface {
@@ -177,6 +211,9 @@ export interface OpenCascadeInstance {
   gp_Ax1_2: new (p: GpPnt, d: GpDir) => GpAx1;
   gp_Ax2_2: new (p: GpPnt, n: GpDir, vx: GpDir) => GpAx2;
   gp_Ax2_3: new (p: GpPnt, n: GpDir) => GpAx2;
+  /** Frame from origin + main (z) direction + x direction; re-orthonormalizes
+   * x and derives y right-handed. */
+  gp_Ax3_3: new (p: GpPnt, n: GpDir, vx: GpDir) => GpAx3;
   gp_Circ_2: new (ax2: GpAx2, radius: number) => GpCirc;
 
   // Topology builders
@@ -206,13 +243,13 @@ export interface OpenCascadeInstance {
     vec: GpVec,
     copy: boolean,
     canonize: boolean,
-  ) => ShapeMaker;
+  ) => SweepMaker;
   BRepPrimAPI_MakeRevol_1: new (
     face: TopoDsShape,
     axis: GpAx1,
     angleRad: number,
     copy: boolean,
-  ) => ShapeMaker;
+  ) => SweepMaker;
 
   // Booleans (OCCT 7.4: two-arg ctor, no-arg Build)
   BRepAlgoAPI_Cut_3: new (target: TopoDsShape, tool: TopoDsShape) => BRepAlgoApiBoolean;
@@ -239,7 +276,7 @@ export interface OpenCascadeInstance {
     selfInter: boolean,
     join: { value: number },
     removeIntEdges: boolean,
-  ) => { IsDone(): boolean; Shape(): TopoDsShape };
+  ) => ShapeHistory & { IsDone(): boolean; Shape(): TopoDsShape };
   BRepOffset_Mode: { BRepOffset_Skin: { value: number } };
   GeomAbs_JoinType: { GeomAbs_Arc: { value: number } };
 
@@ -265,6 +302,12 @@ export interface OpenCascadeInstance {
       useTriangulation: boolean,
     ): void;
     SurfaceProperties_1(
+      shape: TopoDsShape,
+      props: GPropGProps,
+      skipShared: boolean,
+      useTriangulation: boolean,
+    ): void;
+    LinearProperties(
       shape: TopoDsShape,
       props: GPropGProps,
       skipShared: boolean,
@@ -299,6 +342,7 @@ export interface OpenCascadeInstance {
   BRepAdaptor_Curve_2: new (edge: TopoDsEdge) => BRepAdaptorCurve;
   BRepAdaptor_Surface_2: new (face: TopoDsFace, restriction: boolean) => BRepAdaptorSurface;
   GeomAbs_SurfaceType: { GeomAbs_Plane: { value: number } };
+  GeomAbs_CurveType: { GeomAbs_Circle: { value: number } };
   GCPnts_TangentialDeflection_2: new (
     curve: BRepAdaptorCurve,
     angularDeflection: number,

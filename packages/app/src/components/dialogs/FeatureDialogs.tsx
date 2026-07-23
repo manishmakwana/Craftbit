@@ -11,6 +11,8 @@ import {
   type ChamferFeature,
   type CircularPatternFeature,
   type Feature,
+  type JointFeature,
+  type JointRef,
   type LinearPatternFeature,
   type MirrorFeature,
   type MoveFeature,
@@ -20,6 +22,7 @@ import {
 } from "@craftbit/core";
 import { useDocumentStore } from "../../stores/documentStore";
 import { useGeometryStore } from "../../stores/geometryStore";
+import { toEdgeRefs, toFaceRefs } from "../../stores/topoRefs";
 import { useUiStore } from "../../stores/uiStore";
 import { ExpressionInput } from "../ExpressionInput";
 
@@ -196,13 +199,15 @@ export function ChamferDialog({ featureId }: { featureId?: string }) {
         onCancel={cancel}
         onOk={() => {
           if (edges.length === 0) return showToast("Select at least one edge first", true);
+          const refs = toEdgeRefs(edges);
+          if (!refs) return showToast("Selection is stale — re-pick the edges", true);
           const count = doc.features.filter((f) => f.type === "chamfer").length;
           commit({
             id: existing?.id ?? newId(),
             type: "chamfer",
             name: existing?.name ?? `Chamfer ${count + 1}`,
             suppressed: false,
-            edges: edges.map((e) => ({ bodyId: e.bodyId, edgeIndex: e.edgeIndex })),
+            edges: refs,
             distance,
           });
         }}
@@ -240,13 +245,15 @@ export function ShellDialog({ featureId }: { featureId?: string }) {
         onCancel={cancel}
         onOk={() => {
           if (faces.length === 0) return showToast("Select at least one face to open", true);
+          const refs = toFaceRefs(faces);
+          if (!refs) return showToast("Selection is stale — re-pick the faces", true);
           const count = doc.features.filter((f) => f.type === "shell").length;
           commit({
             id: existing?.id ?? newId(),
             type: "shell",
             name: existing?.name ?? `Shell ${count + 1}`,
             suppressed: false,
-            faces: faces.map((f) => ({ bodyId: f.bodyId, faceIndex: f.faceIndex })),
+            faces: refs,
             thickness,
           });
         }}
@@ -497,6 +504,140 @@ export function MoveDialog({ featureId }: { featureId?: string }) {
             tz,
             rotAxis,
             rotAngle,
+          });
+        }}
+      />
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------- joint (D6)
+
+export function JointDialog({ featureId }: { featureId?: string }) {
+  const { doc, existing, commit, cancel, showToast } = useDialogBase<JointFeature>(featureId);
+  const selectedFaces = useUiStore((s) => s.selectedFaces);
+  const selectedEdges = useUiStore((s) => s.selectedEdges);
+  const [jointType, setJointType] = useState<JointFeature["jointType"]>(
+    existing?.jointType ?? "rigid",
+  );
+  const [movingRef, setMovingRef] = useState<JointRef | null>(existing?.movingRef ?? null);
+  const [targetRef, setTargetRef] = useState<JointRef | null>(existing?.targetRef ?? null);
+  const [offset, setOffset] = useState(existing?.offset ?? "0");
+  const [angle, setAngle] = useState(existing?.angle ?? "0");
+  const [flip, setFlip] = useState(existing?.flip ?? false);
+
+  const bodyName = (id: string) => doc.features.find((f) => f.id === id)?.name ?? id.slice(0, 8);
+
+  // Circular edge beats planar face (doc §5 snap priority); with single-pick
+  // selection only one list is non-empty anyway.
+  const captureSelection = (): JointRef | null => {
+    if (selectedEdges.length >= 1) {
+      const refs = toEdgeRefs([selectedEdges[0]!]);
+      return refs?.[0] ? { ...refs[0], kind: "edge" } : null;
+    }
+    if (selectedFaces.length >= 1) {
+      const refs = toFaceRefs([selectedFaces[0]!]);
+      return refs?.[0] ? { ...refs[0], kind: "face" } : null;
+    }
+    return null;
+  };
+
+  const pickRow = (
+    label: string,
+    ref: JointRef | null,
+    set: (r: JointRef) => void,
+    testid: string,
+  ) => (
+    <div className="field">
+      <label>{label}</label>
+      <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+        <span style={{ flex: 1, fontSize: 12, opacity: ref ? 1 : 0.7 }}>
+          {ref
+            ? `${bodyName(ref.bodyId)} · ${ref.kind === "face" ? "planar face" : "circular edge"}`
+            : "click a planar face or circular edge, then Set"}
+        </span>
+        <button
+          className="btn"
+          data-testid={testid}
+          onClick={() => {
+            const captured = captureSelection();
+            if (!captured) {
+              return showToast("Select one planar face or circular edge first — re-pick", true);
+            }
+            set(captured);
+          }}
+        >
+          Set
+        </button>
+      </div>
+    </div>
+  );
+
+  return (
+    <div className="dialog-card" data-testid="joint-dialog">
+      <h2>⚯ Joint</h2>
+      <div className="dialog-hint">
+        The moving body snaps onto the target; offset/angle position it along/about the joint axis.
+      </div>
+      <div className="field">
+        <label>Type</label>
+        <select
+          value={jointType}
+          onChange={(e) => setJointType(e.target.value as JointFeature["jointType"])}
+          data-testid="joint-type"
+        >
+          <option value="rigid">Rigid</option>
+          <option value="revolute">Revolute (rotates)</option>
+          <option value="slider">Slider (slides)</option>
+          <option value="cylindrical">Cylindrical (rotates + slides)</option>
+        </select>
+      </div>
+      {pickRow("Moving side", movingRef, setMovingRef, "joint-set-moving")}
+      {pickRow("Target side", targetRef, setTargetRef, "joint-set-target")}
+      <ExpressionInput
+        label="Offset along axis (mm)"
+        value={offset}
+        onCommit={setOffset}
+        testid="joint-offset"
+      />
+      <ExpressionInput
+        label="Angle about axis (deg)"
+        value={angle}
+        onCommit={setAngle}
+        testid="joint-angle"
+      />
+      <div className="field">
+        <label>
+          <input
+            type="checkbox"
+            checked={flip}
+            onChange={(e) => setFlip(e.target.checked)}
+            data-testid="joint-flip"
+          />{" "}
+          Flip mate direction
+        </label>
+      </div>
+      <Footer
+        okTestid="joint-ok"
+        onCancel={cancel}
+        onOk={() => {
+          if (!movingRef || !targetRef) return showToast("Set both joint sides", true);
+          if (movingRef.bodyId === targetRef.bodyId) {
+            return showToast("Moving and target must be different bodies", true);
+          }
+          const n = doc.features.filter((f) => f.type === "joint").length;
+          commit({
+            id: existing?.id ?? newId(),
+            type: "joint",
+            name: existing?.name ?? `Joint ${n + 1}`,
+            suppressed: false,
+            jointType,
+            movingRef,
+            targetRef,
+            offset,
+            angle,
+            flip,
+            ...(existing?.limits ? { limits: existing.limits } : {}),
           });
         }}
       />

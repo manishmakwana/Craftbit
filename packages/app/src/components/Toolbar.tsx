@@ -123,6 +123,12 @@ function ModelToolbar() {
         { kind: "move" },
         { disabled: !hasBody, title: "Move/rotate a body (assembly positioning)" },
       )}
+      {btn(
+        "tool-joint",
+        "⚯ Joint",
+        { kind: "joint" },
+        { disabled: !hasBody, title: "Joint: mate two bodies via faces or circular edges" },
+      )}
       <span style={{ width: 8 }} />
       <button
         className="btn"
