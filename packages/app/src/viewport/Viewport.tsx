@@ -70,6 +70,9 @@ export function Viewport() {
   const lineChainRef = useRef<LineChainState | null>(null);
   const dimPicksRef = useRef<DimPick[]>([]);
   const entityDragRef = useRef<EntityDragState | null>(null);
+  // Reactive mirror of dimPicksRef so picked entities highlight as "selected"
+  // in the Dimension tool (the ref alone can't drive a re-render).
+  const [dimPickIds, setDimPickIds] = useState<string[]>([]);
   /** Set when pointer-down consumed the click on a curve entity, so the
    * pointer-up profile-pick fallback must not clear that selection. */
   const entityClickRef = useRef(false);
@@ -124,14 +127,25 @@ export function Viewport() {
     const sceneManager = managerRef.current;
     if (!sceneManager || !result) return;
     sceneManager.setRegenResult(result, useDocumentStore.getState().doc.bodyColors);
+    // In the Dimension tool, the picked entities are the highlight set (shown
+    // as "selected"); otherwise it's the Select-tool entity selection.
+    const highlightIds = sketchTool === "dimension" ? dimPickIds : selectedEntityIds;
     sceneManager.setSketches(
       result.sketches,
       activeSketchId,
       selectedProfileId,
-      selectedEntityIds,
+      highlightIds,
       hoverEntityId,
     );
-  }, [result, activeSketchId, selectedProfileId, selectedEntityIds, hoverEntityId]);
+  }, [
+    result,
+    activeSketchId,
+    selectedProfileId,
+    selectedEntityIds,
+    hoverEntityId,
+    sketchTool,
+    dimPickIds,
+  ]);
 
   useEffect(() => {
     managerRef.current?.setHighlights(hover, selectedFaces, selectedEdges);
@@ -141,6 +155,7 @@ export function Viewport() {
   useEffect(() => {
     setHoverEntityId(null);
     dimPicksRef.current = [];
+    setDimPickIds([]);
   }, [sketchTool, mode]);
 
   // Camera to sketch plane on entry; restore on exit.
@@ -208,6 +223,12 @@ export function Viewport() {
   };
 
   // --- Dimension tool -------------------------------------------------------
+
+  /** Sets the pick set on both the synchronous ref and the render state. */
+  const setDimPicks = (picks: DimPick[]) => {
+    dimPicksRef.current = picks;
+    setDimPickIds(picks.map((p) => p.id));
+  };
 
   /** Turns the current pick set into a dimension spec (no `place`), or null
    * when the picks don't yet form a complete/valid dimension. Two-line picks
@@ -281,7 +302,7 @@ export function Viewport() {
       constraints: [...(feature.constraints ?? []), constraint],
     };
     useDocumentStore.getState().dispatch({ kind: "updateFeature", featureId: feature.id, next });
-    dimPicksRef.current = [];
+    setDimPicks([]);
     useUiStore.getState().setDimDraft(null);
   };
 
@@ -297,10 +318,10 @@ export function Viewport() {
       // Adding this pick — does it (with existing picks) form a valid spec?
       const extended = [...picks, { id: picked.entityId, kind: picked.kind }];
       if (dimSpecFromPicks(extended, entities) || extended.length === 1) {
-        dimPicksRef.current = extended;
+        setDimPicks(extended);
       } else {
         // Incompatible with the running set — restart from this pick.
-        dimPicksRef.current = [{ id: picked.entityId, kind: picked.kind }];
+        setDimPicks([{ id: picked.entityId, kind: picked.kind }]);
       }
       return;
     }
@@ -577,10 +598,23 @@ export function Viewport() {
         return;
       }
 
-      // Dimension tool: once the picks form a dimension, preview it following
-      // the cursor; before that, hover-highlight the next pickable entity.
+      // Dimension tool: always hover-highlight the entity under the cursor
+      // (so the next pickable line lights up — including the second line of an
+      // angle), and once the picks form a dimension, preview it too.
       if (sketchTool === "dimension") {
         const entities = currentEntities();
+        const screen = toLocal(e);
+        const picked =
+          entities.length > 0
+            ? pickSketchEntity(entities, entityProjector, screen.x, screen.y)
+            : null;
+        // An already-picked entity shows as "selected", not a hover target.
+        const hoverId =
+          picked && !dimPicksRef.current.some((p) => p.id === picked.entityId)
+            ? picked.entityId
+            : null;
+        setHoverEntityId(hoverId);
+
         const spec = dimSpecFromPicks(dimPicksRef.current, entities);
         if (spec) {
           const planePt = manager.pickOnPlane(ndc.x, ndc.y, activeSketch);
@@ -589,15 +623,8 @@ export function Viewport() {
               .getState()
               .setDimDraft({ ...spec, place: dimPlaceFromCursor(spec, planePt) });
           }
-          setHoverEntityId(null);
-        } else {
-          const screen = toLocal(e);
-          const picked =
-            entities.length > 0
-              ? pickSketchEntity(entities, entityProjector, screen.x, screen.y)
-              : null;
-          setHoverEntityId(picked?.entityId ?? null);
-          if (useUiStore.getState().dimDraft) useUiStore.getState().setDimDraft(null);
+        } else if (useUiStore.getState().dimDraft) {
+          useUiStore.getState().setDimDraft(null);
         }
         return;
       }
@@ -749,6 +776,7 @@ export function Viewport() {
       lineChainRef.current = null;
       entityDragRef.current = null;
       dimPicksRef.current = [];
+      setDimPickIds([]);
       useUiStore.getState().setDimDraft(null);
       if (managerRef.current) {
         managerRef.current.setPreview(null, false);
