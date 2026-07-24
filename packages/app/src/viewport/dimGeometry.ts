@@ -24,9 +24,14 @@ export interface Pt {
 }
 
 export interface DimGeometry {
-  /** Measured value: mm for linear/radial, degrees for angle. */
+  /** Measured value: mm for linear/radial, degrees for angle. For angles this
+   * is the (positive) angle of the sector the label sits in — interior or
+   * exterior depending on placement. */
   value: number;
   unit: "mm" | "deg";
+  /** Angle dims only: the signed inter-line angle (deg) the solver targets —
+   * independent of which sector the label is placed in. */
+  signedAngle?: number;
   /** Witness/extension lines from the geometry out to the dimension line. */
   witness: [Pt, Pt][];
   /** Straight dimension-line segments (linear/radial dims). */
@@ -156,14 +161,35 @@ function angleDim(a: [Pt, Pt], b: [Pt, Pt], place: DimPlacement | undefined): Di
   const v = intersect(a, b) ?? scale(add(a[0], b[0]), 0.5);
   const da = norm(sub(a[1], a[0]));
   const db = norm(sub(b[1], b[0]));
-  const a0 = Math.atan2(da.y, da.x);
-  let a1 = Math.atan2(db.y, db.x);
-  // Signed sweep a0→a1 in (−π, π].
-  let sweep = a1 - a0;
-  while (sweep <= -Math.PI) sweep += 2 * Math.PI;
-  while (sweep > Math.PI) sweep -= 2 * Math.PI;
-  a1 = a0 + sweep;
-  const r = place ? Math.max(4, len({ x: place.ox, y: place.oy })) : 14;
+  // The signed inter-line angle the solver drives (independent of placement).
+  const signed = (Math.atan2(da.x * db.y - da.y * db.x, da.x * db.x + da.y * db.y) * 180) / Math.PI;
+  // The two lines emit four rays from the vertex, splitting the plane into four
+  // sectors. The cursor lands in one of them — the arc must span exactly that
+  // sector (bounded by the two rays bracketing the cursor angle), so the
+  // dimension reads the interior angle or its supplement depending on where
+  // it's dropped. Default to the +da/+db bisector when unplaced.
+  const TAU = 2 * Math.PI;
+  const mod2 = (x: number) => ((x % TAU) + TAU) % TAU;
+  const cur =
+    place && len({ x: place.ox, y: place.oy }) > 1e-6 ? { x: place.ox, y: place.oy } : add(da, db);
+  const tc = mod2(Math.atan2(cur.y, cur.x));
+  const pa = Math.atan2(da.y, da.x);
+  const pb = Math.atan2(db.y, db.x);
+  const rays = [pa, pa + Math.PI, pb, pb + Math.PI].map(mod2).sort((x, y) => x - y);
+  // Bracket the cursor angle: the sector [a0, a1] with a0 ≤ tc < a1 (cyclic).
+  let a0 = rays[3]! - TAU;
+  let a1 = rays[0]!;
+  for (let i = 0; i < 4; i++) {
+    const lo = rays[i]!;
+    const hi = i < 3 ? rays[i + 1]! : rays[0]! + TAU;
+    if (hi - lo > 1e-9 && tc >= lo && tc < hi) {
+      a0 = lo;
+      a1 = hi;
+      break;
+    }
+  }
+  const sweep = a1 - a0;
+  const r = place ? Math.max(6, len({ x: place.ox, y: place.oy })) : 14;
   const mAng = a0 + sweep / 2;
   const arcMid = add(v, { x: Math.cos(mAng) * r, y: Math.sin(mAng) * r });
   const end0 = add(v, { x: Math.cos(a0) * r, y: Math.sin(a0) * r });
@@ -175,6 +201,7 @@ function angleDim(a: [Pt, Pt], b: [Pt, Pt], place: DimPlacement | undefined): Di
   return {
     value: Math.abs((sweep * 180) / Math.PI),
     unit: "deg",
+    signedAngle: signed,
     witness: [
       [v, end0],
       [v, end1],

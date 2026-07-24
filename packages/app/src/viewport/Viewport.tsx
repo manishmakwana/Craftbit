@@ -291,7 +291,13 @@ export function Viewport() {
     const map = new Map(currentEntities().map((e) => [e.id, e]));
     const g = dimGeometry(spec, map);
     if (!g) return;
-    const value = spec.kind === "angle" ? String(Math.round(g.value * 10) / 10) : fmtNum(g.value);
+    // Angles store the SIGNED inter-line angle (the solver's target) so the
+    // geometry doesn't jump at creation; the label derives the placed sector
+    // from geometry. Linear/radial store the measured value directly.
+    const value =
+      spec.kind === "angle"
+        ? String(Math.round((g.signedAngle ?? g.value) * 10) / 10)
+        : fmtNum(g.value);
     const id = newId();
     const constraint: SketchConstraint =
       spec.kind === "distance" || spec.kind === "lineDistance" || spec.kind === "angle"
