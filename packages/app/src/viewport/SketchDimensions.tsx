@@ -252,6 +252,44 @@ export function SketchDimensions({
     setInvalid(false);
   };
 
+  /**
+   * Angle edits operate on the placed sector value (what the label shows), but
+   * the constraint stores the signed inter-line angle the solver targets.
+   * Convert the typed sector angle back, preserving the stored sign and whether
+   * the label sits on the interior (|θ|) or exterior (180−|θ|) sector.
+   */
+  const commitAngleValue = (cd: ConstraintDim, g: DimGeometry) => {
+    let x: number;
+    try {
+      x = evaluateExpression(text, (name) => {
+        const value = paramValues[name];
+        if (value === undefined) throw new Error(`Unknown parameter "${name}"`);
+        return value;
+      });
+    } catch {
+      setInvalid(true);
+      return;
+    }
+    if (!(x > 0 && x < 180)) {
+      setInvalid(true);
+      return;
+    }
+    const stored = evalOr(cd.expression); // signed inter-line angle
+    const absT = Math.abs(stored);
+    const supplement = Math.abs(g.value - (180 - absT)) < Math.abs(g.value - absT);
+    const sign = stored < 0 ? -1 : 1;
+    const theta = sign * (supplement ? 180 - x : x);
+    const next: SketchFeature = {
+      ...feature,
+      constraints: (feature.constraints ?? []).map((c) =>
+        c.id === cd.constraintId ? ({ ...c, value: fmt(theta) } as SketchConstraint) : c,
+      ),
+    };
+    dispatch({ kind: "updateFeature", featureId: feature.id, next });
+    setEditing(null);
+    setInvalid(false);
+  };
+
   const commitProfileValue = (profileId: string, field: string, allowNonPositive: boolean) => {
     if (!validate(text, allowNonPositive)) {
       setInvalid(true);
@@ -447,7 +485,11 @@ export function SketchDimensions({
               if (dragPlace) return; // was a drag, not a click
               if (!isEditing) {
                 setEditing(cd.constraintId);
-                setText(cd.expression);
+                // Angles edit the placed sector value shown on the label; other
+                // dims edit their raw expression directly.
+                setText(
+                  cd.spec.kind === "angle" ? String(Math.round(g.value * 10) / 10) : cd.expression,
+                );
                 setInvalid(false);
               }
             }}
@@ -461,17 +503,28 @@ export function SketchDimensions({
                   size={Math.max(4, text.length)}
                   onChange={(e) => {
                     setText(e.target.value);
-                    setInvalid(!validate(e.target.value, cd.allowNonPositive));
+                    setInvalid(
+                      cd.spec.kind === "angle"
+                        ? false
+                        : !validate(e.target.value, cd.allowNonPositive),
+                    );
                   }}
                   onKeyDown={(e) => {
-                    if (e.key === "Enter") commitValue(cd.constraintId, cd.allowNonPositive);
+                    if (e.key === "Enter") {
+                      if (cd.spec.kind === "angle") commitAngleValue(cd, g);
+                      else commitValue(cd.constraintId, cd.allowNonPositive);
+                    }
                     if (e.key === "Escape") {
                       e.stopPropagation();
                       setEditing(null);
                       setInvalid(false);
                     }
                   }}
-                  onBlur={() => commitValue(cd.constraintId, cd.allowNonPositive)}
+                  onBlur={() =>
+                    cd.spec.kind === "angle"
+                      ? commitAngleValue(cd, g)
+                      : commitValue(cd.constraintId, cd.allowNonPositive)
+                  }
                 />
                 {cd.radial && (
                   <button
