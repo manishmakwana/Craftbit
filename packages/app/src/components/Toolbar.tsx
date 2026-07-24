@@ -226,6 +226,7 @@ function SketchToolbar() {
     { id: "rect", label: "▭ Rectangle", testid: "sketch-tool-rect" },
     { id: "circle", label: "◯ Circle", testid: "sketch-tool-circle" },
     { id: "polygon", label: "⬠ Polygon", testid: "sketch-tool-polygon" },
+    { id: "dimension", label: "↔ Dimension", testid: "sketch-tool-dimension" },
   ];
 
   const cbtn = (

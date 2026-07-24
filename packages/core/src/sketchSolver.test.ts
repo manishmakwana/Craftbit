@@ -145,6 +145,45 @@ describe("solveSketch", () => {
     expect(q.y).toBeCloseTo(20 * Math.sin(Math.PI / 4), 4);
   });
 
+  it("diameter constraint drives a circle to half the given value in radius", () => {
+    const entities: SketchEntity[] = [
+      pt("cc", 0, 0),
+      { id: "circ", kind: "circle", center: "cc", radius: 3 },
+    ];
+    const constraints: SolvedConstraint[] = [
+      { id: "k1", kind: "fixed", point: "cc" },
+      { id: "k2", kind: "diameter", entity: "circ", value: 16 },
+    ];
+    const result = solveSketch(entities, constraints);
+    expect(result.converged).toBe(true);
+    const circ = result.entities.find((e) => e.id === "circ");
+    expect(circ?.kind === "circle" && circ.radius).toBeCloseTo(8, 5);
+  });
+
+  it("lineDistance sets the perpendicular gap between two parallel lines", () => {
+    const entities: SketchEntity[] = [
+      pt("a", 0, 0),
+      pt("b", 40, 0),
+      pt("c", 3, 9), // second line roughly parallel, ~9 above
+      pt("d", 44, 11),
+      ln("l1", "a", "b"),
+      ln("l2", "c", "d"),
+    ];
+    const constraints: SolvedConstraint[] = [
+      { id: "k1", kind: "fixed", point: "a" },
+      { id: "k2", kind: "fixed", point: "b" },
+      { id: "k3", kind: "horizontal", line: "l2" },
+      { id: "k4", kind: "lineDistance", a: "l1", b: "l2", value: 15 },
+    ];
+    const result = solveSketch(entities, constraints);
+    expect(result.converged).toBe(true);
+    const c = solvedPoint(result, "c");
+    const d = solvedPoint(result, "d");
+    // Both endpoints of the horizontal second line sit 15 above the base line.
+    expect(Math.abs(c.y)).toBeCloseTo(15, 4);
+    expect(Math.abs(d.y)).toBeCloseTo(15, 4);
+  });
+
   it("equalLength makes two lines the same length", () => {
     const entities: SketchEntity[] = [
       pt("a", 0, 0),

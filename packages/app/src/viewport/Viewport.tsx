@@ -5,6 +5,7 @@ import {
   newId,
   resolveSketchConstraints,
   solveSketch,
+  type SketchConstraint,
   type SketchEntity,
   type SketchFeature,
   type SketchProfile,
@@ -18,6 +19,7 @@ import {
   type PickResult,
 } from "./sceneManager";
 import { SketchDimensions } from "./SketchDimensions";
+import { dimGeometry, type DimSpec } from "./dimGeometry";
 import { pickSketchEntity } from "./sketchPick";
 import { useDocumentStore } from "../stores/documentStore";
 import { useGeometryStore } from "../stores/geometryStore";
@@ -41,6 +43,12 @@ interface LineChainState {
   cursor: { x: number; y: number } | null;
 }
 
+/** In-progress Dimension-tool pick set (entities clicked so far). */
+interface DimPick {
+  id: string;
+  kind: SketchEntity["kind"];
+}
+
 /** In-progress point drag (Select tool): live-solved locally, committed on release. */
 interface EntityDragState {
   pointId: string;
@@ -60,6 +68,7 @@ export function Viewport() {
   const managerRef = useRef<SceneManager | null>(null);
   const drawRef = useRef<DrawState | null>(null);
   const lineChainRef = useRef<LineChainState | null>(null);
+  const dimPicksRef = useRef<DimPick[]>([]);
   const entityDragRef = useRef<EntityDragState | null>(null);
   /** Set when pointer-down consumed the click on a curve entity, so the
    * pointer-up profile-pick fallback must not clear that selection. */
@@ -131,6 +140,7 @@ export function Viewport() {
   // Stale hover would otherwise linger after switching tools/leaving Select.
   useEffect(() => {
     setHoverEntityId(null);
+    dimPicksRef.current = [];
   }, [sketchTool, mode]);
 
   // Camera to sketch plane on entry; restore on exit.
@@ -195,6 +205,111 @@ export function Viewport() {
   const entityProjector = (x: number, y: number) => {
     const m = managerRef.current!;
     return m.projectToScreen(entityWorldPoint(activeSketch!, x, y));
+  };
+
+  // --- Dimension tool -------------------------------------------------------
+
+  /** Turns the current pick set into a dimension spec (no `place`), or null
+   * when the picks don't yet form a complete/valid dimension. Two-line picks
+   * near-parallel become a linear gap, otherwise an angle (Fusion behavior). */
+  const dimSpecFromPicks = (picks: DimPick[], entities: SketchEntity[]): DimSpec | null => {
+    const byId = new Map(entities.map((e) => [e.id, e]));
+    if (picks.length === 1) {
+      const p = picks[0]!;
+      if (p.kind === "line") {
+        const l = byId.get(p.id);
+        if (l && l.kind === "line") return { kind: "distance", a: l.p1, b: l.p2 };
+      }
+      if (p.kind === "circle") return { kind: "diameter", entity: p.id };
+      if (p.kind === "arc") return { kind: "radius", entity: p.id };
+      return null; // a single point isn't a dimension yet
+    }
+    if (picks.length === 2) {
+      const [a, b] = picks;
+      if (a!.kind === "point" && b!.kind === "point") {
+        return { kind: "distance", a: a!.id, b: b!.id };
+      }
+      if (a!.kind === "line" && b!.kind === "line") {
+        const la = byId.get(a!.id);
+        const lb = byId.get(b!.id);
+        if (la?.kind === "line" && lb?.kind === "line") {
+          const pa = [byId.get(la.p1), byId.get(la.p2)];
+          const pb = [byId.get(lb.p1), byId.get(lb.p2)];
+          if (pa.every((p) => p?.kind === "point") && pb.every((p) => p?.kind === "point")) {
+            const pt = pa.concat(pb) as Extract<SketchEntity, { kind: "point" }>[];
+            const [a1, a2, b1, b2] = pt;
+            const da = { x: a2!.x - a1!.x, y: a2!.y - a1!.y };
+            const db = { x: b2!.x - b1!.x, y: b2!.y - b1!.y };
+            const cross = da.x * db.y - da.y * db.x;
+            const dot = da.x * db.x + da.y * db.y;
+            const angleDeg = Math.abs((Math.atan2(cross, dot) * 180) / Math.PI);
+            const parallel = angleDeg < 5 || angleDeg > 175;
+            return parallel
+              ? { kind: "lineDistance", a: a!.id, b: b!.id }
+              : { kind: "angle", a: a!.id, b: b!.id };
+          }
+        }
+      }
+    }
+    return null;
+  };
+
+  /** Offset (sketch-local) from the dimension's reference point to the cursor,
+   * used as the `place` so the dimension line follows where the user drops it. */
+  const dimPlaceFromCursor = (spec: DimSpec, cursor: { x: number; y: number }) => {
+    const g = dimGeometry(spec, new Map(currentEntities().map((e) => [e.id, e])));
+    if (!g) return { ox: 0, oy: 0 };
+    return { ox: cursor.x - g.ref.x, oy: cursor.y - g.ref.y };
+  };
+
+  /** Commits the placed dimension as a driving constraint (measured value) and
+   * opens its editor. Resets the pick set. */
+  const commitDimension = (spec: DimSpec, place: { ox: number; oy: number }) => {
+    const feature = activeFeature();
+    if (!feature) return;
+    const map = new Map(currentEntities().map((e) => [e.id, e]));
+    const g = dimGeometry(spec, map);
+    if (!g) return;
+    const value = spec.kind === "angle" ? String(Math.round(g.value * 10) / 10) : fmtNum(g.value);
+    const id = newId();
+    const constraint: SketchConstraint =
+      spec.kind === "distance" || spec.kind === "lineDistance" || spec.kind === "angle"
+        ? { id, kind: spec.kind, a: spec.a, b: spec.b, value, place }
+        : { id, kind: spec.kind, entity: spec.entity, value, place };
+    const next: SketchFeature = {
+      ...feature,
+      constraints: [...(feature.constraints ?? []), constraint],
+    };
+    useDocumentStore.getState().dispatch({ kind: "updateFeature", featureId: feature.id, next });
+    dimPicksRef.current = [];
+    useUiStore.getState().setDimDraft(null);
+  };
+
+  /** A Dimension-tool click: extend the pick set, or place when the picks are
+   * already complete and the click lands on empty space. */
+  const dimensionClick = (planePt: { x: number; y: number }, screen: { x: number; y: number }) => {
+    const entities = currentEntities();
+    const picked = pickSketchEntity(entities, entityProjector, screen.x, screen.y);
+    const picks = dimPicksRef.current;
+    const readySpec = dimSpecFromPicks(picks, entities);
+
+    if (picked) {
+      // Adding this pick — does it (with existing picks) form a valid spec?
+      const extended = [...picks, { id: picked.entityId, kind: picked.kind }];
+      if (dimSpecFromPicks(extended, entities) || extended.length === 1) {
+        dimPicksRef.current = extended;
+      } else {
+        // Incompatible with the running set — restart from this pick.
+        dimPicksRef.current = [{ id: picked.entityId, kind: picked.kind }];
+      }
+      return;
+    }
+
+    // Empty-space click: if the current picks already form a dimension, this is
+    // the placement click.
+    if (readySpec) {
+      commitDimension(readySpec, dimPlaceFromCursor(readySpec, planePt));
+    }
   };
 
   const paramEnv = (name: string): number => {
@@ -319,6 +434,14 @@ export function Viewport() {
       return;
     }
 
+    if (mode === "sketch" && activeSketch && sketchTool === "dimension") {
+      const ndc = toNdc(e);
+      const planePt = manager.pickOnPlane(ndc.x, ndc.y, activeSketch);
+      if (!planePt) return;
+      dimensionClick(planePt, toLocal(e));
+      return;
+    }
+
     // Select tool: entity picking (points are drag handles; curves select).
     if (mode === "sketch" && activeSketch && sketchTool === "select") {
       const screen = toLocal(e);
@@ -340,7 +463,13 @@ export function Viewport() {
       return; // empty click: handled on pointer-up (clears selection / picks profiles)
     }
 
-    if (mode === "sketch" && activeSketch && sketchTool !== "select" && sketchTool !== "line") {
+    if (
+      mode === "sketch" &&
+      activeSketch &&
+      sketchTool !== "select" &&
+      sketchTool !== "line" &&
+      sketchTool !== "dimension"
+    ) {
       const ndc = toNdc(e);
       const local = manager.pickOnPlane(ndc.x, ndc.y, activeSketch);
       if (!local) return;
@@ -445,6 +574,31 @@ export function Viewport() {
             ? pickSketchEntity(entities, entityProjector, screen.x, screen.y)
             : null;
         setHoverEntityId(picked?.entityId ?? null);
+        return;
+      }
+
+      // Dimension tool: once the picks form a dimension, preview it following
+      // the cursor; before that, hover-highlight the next pickable entity.
+      if (sketchTool === "dimension") {
+        const entities = currentEntities();
+        const spec = dimSpecFromPicks(dimPicksRef.current, entities);
+        if (spec) {
+          const planePt = manager.pickOnPlane(ndc.x, ndc.y, activeSketch);
+          if (planePt) {
+            useUiStore
+              .getState()
+              .setDimDraft({ ...spec, place: dimPlaceFromCursor(spec, planePt) });
+          }
+          setHoverEntityId(null);
+        } else {
+          const screen = toLocal(e);
+          const picked =
+            entities.length > 0
+              ? pickSketchEntity(entities, entityProjector, screen.x, screen.y)
+              : null;
+          setHoverEntityId(picked?.entityId ?? null);
+          if (useUiStore.getState().dimDraft) useUiStore.getState().setDimDraft(null);
+        }
         return;
       }
 
@@ -594,6 +748,8 @@ export function Viewport() {
       drawRef.current = null;
       lineChainRef.current = null;
       entityDragRef.current = null;
+      dimPicksRef.current = [];
+      useUiStore.getState().setDimDraft(null);
       if (managerRef.current) {
         managerRef.current.setPreview(null, false);
         managerRef.current.controls.enabled = true;

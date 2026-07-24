@@ -4,8 +4,9 @@
  */
 
 import { create } from "zustand";
+import type { DimSpec } from "../viewport/dimGeometry";
 
-export type SketchTool = "select" | "rect" | "circle" | "polygon" | "line";
+export type SketchTool = "select" | "rect" | "circle" | "polygon" | "line" | "dimension";
 
 export interface FaceSel {
   bodyId: string;
@@ -46,6 +47,9 @@ interface UiState {
   dialog: DialogState;
   toast: { message: string; error: boolean } | null;
   hint: string;
+  /** Live Dimension-tool preview: a not-yet-committed dimension following the
+   * cursor. Rendered by the dimension overlay; null when not placing. */
+  dimDraft: DimSpec | null;
 
   enterSketch(sketchId: string): void;
   exitSketch(): void;
@@ -59,6 +63,7 @@ interface UiState {
   openDialog(dialog: DialogState): void;
   showToast(message: string, error?: boolean): void;
   setHint(hint: string): void;
+  setDimDraft(draft: DimSpec | null): void;
 }
 
 let toastTimer: ReturnType<typeof setTimeout> | null = null;
@@ -75,18 +80,22 @@ export const useUiStore = create<UiState>((set) => ({
   dialog: null,
   toast: null,
   hint: "Create a sketch to start",
+  dimDraft: null,
 
   enterSketch(sketchId) {
     set({
       mode: "sketch",
       activeSketchId: sketchId,
-      sketchTool: "line",
+      // Enter in Select — nothing drawing-armed, so a stray click doesn't
+      // start a line (req: no default draw tool on sketch entry).
+      sketchTool: "select",
       dialog: null,
       selectedFaces: [],
       selectedEdges: [],
       selectedProfileId: null,
       selectedEntityIds: [],
-      hint: "Click to draw connected lines · click the first point to close · Esc to end",
+      dimDraft: null,
+      hint: "Select a tool, or click geometry to select · draw and dimension your profile",
     });
   },
 
@@ -96,6 +105,7 @@ export const useUiStore = create<UiState>((set) => ({
       activeSketchId: null,
       selectedProfileId: null,
       selectedEntityIds: [],
+      dimDraft: null,
       hint: "Select faces or edges, or create a feature",
     });
   },
@@ -108,8 +118,10 @@ export const useUiStore = create<UiState>((set) => ({
       circle: "Drag from center to draw a circle",
       polygon: "Click to add points · double-click to close",
       line: "Click to draw connected lines · click the first point to close · Esc to end",
+      dimension:
+        "Click a line (length), two points/lines (distance/angle), or a circle/arc (Ø/R) · click to place · Esc to cancel",
     };
-    set({ sketchTool: tool, hint: hints[tool], selectedEntityIds: [] });
+    set({ sketchTool: tool, hint: hints[tool], selectedEntityIds: [], dimDraft: null });
   },
 
   selectFace(sel, additive = false) {
@@ -194,5 +206,9 @@ export const useUiStore = create<UiState>((set) => ({
 
   setHint(hint) {
     set({ hint });
+  },
+
+  setDimDraft(draft) {
+    set({ dimDraft: draft });
   },
 }));

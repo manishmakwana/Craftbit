@@ -83,6 +83,16 @@ export type SketchProfile = SketchProfileRect | SketchProfileCircle | SketchProf
  * entity type definitions — coordinates there are already plain numbers, so
  * document and solver share them).
  */
+/**
+ * On-canvas placement of a dimension's line/label: an offset (sketch-local mm)
+ * from the geometry the dimension is computed against. Display-only — the
+ * solver ignores it. Set when the user places or drags a dimension.
+ */
+export interface DimPlacement {
+  ox: number;
+  oy: number;
+}
+
 export type SketchConstraint =
   | { id: string; kind: "coincident"; a: string; b: string }
   | { id: string; kind: "horizontal"; line: string }
@@ -91,9 +101,26 @@ export type SketchConstraint =
   | { id: string; kind: "perpendicular"; a: string; b: string }
   | { id: string; kind: "equalLength"; a: string; b: string }
   | { id: string; kind: "equalRadius"; a: string; b: string }
-  | { id: string; kind: "distance"; a: string; b: string; value: Expr }
-  | { id: string; kind: "radius"; entity: string; value: Expr }
-  | { id: string; kind: "angle"; a: string; b: string; /** degrees */ value: Expr }
+  | { id: string; kind: "distance"; a: string; b: string; value: Expr; place?: DimPlacement }
+  | {
+      /** Perpendicular distance between two (parallel) lines. */
+      id: string;
+      kind: "lineDistance";
+      a: string;
+      b: string;
+      value: Expr;
+      place?: DimPlacement;
+    }
+  | { id: string; kind: "radius"; entity: string; value: Expr; place?: DimPlacement }
+  | { id: string; kind: "diameter"; entity: string; value: Expr; place?: DimPlacement }
+  | {
+      id: string;
+      kind: "angle";
+      a: string;
+      b: string;
+      /** degrees */ value: Expr;
+      place?: DimPlacement;
+    }
   | { id: string; kind: "tangent"; line: string; circle: string }
   | { id: string; kind: "fixed"; point: string };
 
