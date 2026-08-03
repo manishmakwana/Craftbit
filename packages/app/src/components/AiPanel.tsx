@@ -9,11 +9,12 @@ import { useEffect, useRef, useState } from "react";
 import { runAgent } from "../ai/agent";
 import { executeTool } from "../ai/execute";
 import { AI_MODELS, useAiStore, type AiModel } from "../stores/aiStore";
+import { useGeometryStore } from "../stores/geometryStore";
 import { newId } from "@craftbit/core";
 
 export function AiPanel() {
   const { apiKey, model, entries, running } = useAiStore();
-  const { setApiKey, setModel, addEntry, clear, setRunning } = useAiStore.getState();
+  const { setApiKey, setModel, addEntry, appendText, clear, setRunning } = useAiStore.getState();
   const [draft, setDraft] = useState("");
   const [showSettings, setShowSettings] = useState(!apiKey);
   const listRef = useRef<HTMLDivElement | null>(null);
@@ -24,8 +25,17 @@ export function AiPanel() {
 
   // Dev/E2E hook: lets tests drive the same tools the model uses, so the tool
   // pipeline can be verified building real geometry without a live API key.
+  // `bodies()` reads current body volumes so tests can assert cut/join results
+  // (which modify an existing body in place, so the tool text omits a volume).
   useEffect(() => {
-    (window as unknown as { __craftbitAI?: unknown }).__craftbitAI = { executeTool };
+    (window as unknown as { __craftbitAI?: unknown }).__craftbitAI = {
+      executeTool,
+      bodies: () =>
+        (useGeometryStore.getState().result?.bodies ?? []).map((b) => ({
+          id: b.id,
+          volume: b.volume,
+        })),
+    };
   }, []);
 
   const send = async () => {
@@ -41,7 +51,13 @@ export function AiPanel() {
     await runAgent(text, {
       apiKey,
       model,
-      onText: (t) => addEntry({ id: newId(), role: "assistant", kind: "text", text: t }),
+      onBlockStart: (kind) => {
+        const id = newId();
+        if (kind === "thinking") addEntry({ id, kind: "thinking", text: "" });
+        else addEntry({ id, role: "assistant", kind: "text", text: "" });
+        return id;
+      },
+      onBlockDelta: (id, delta) => appendText(id, delta),
       onTool: (tool, summary, ok) => addEntry({ id: newId(), kind: "tool", tool, summary, ok }),
       onError: (m) => addEntry({ id: newId(), kind: "error", text: m }),
     });
@@ -107,6 +123,10 @@ export function AiPanel() {
         {entries.map((e) =>
           e.kind === "text" ? (
             <div key={e.id} className={`ai-msg ${e.role}`}>
+              {e.text}
+            </div>
+          ) : e.kind === "thinking" ? (
+            <div key={e.id} className="ai-thinking-block" data-testid="ai-thinking">
               {e.text}
             </div>
           ) : e.kind === "tool" ? (

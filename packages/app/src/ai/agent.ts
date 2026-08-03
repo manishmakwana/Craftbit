@@ -5,8 +5,10 @@
  * document (ai/execute.ts), feed the results plus a refreshed snapshot of the
  * document back, and repeat until Claude stops calling tools.
  *
- * The full assistant `content` (including thinking blocks) is echoed back each
- * turn, as the API requires for multi-turn tool use on the same model.
+ * Each turn is streamed, so the model's thinking and replies land in the panel
+ * token-by-token (onBlockStart/onBlockDelta). The full assistant `content`
+ * (including thinking blocks) is echoed back each turn, as the API requires for
+ * multi-turn tool use on the same model.
  */
 
 import Anthropic from "@anthropic-ai/sdk";
@@ -18,7 +20,9 @@ import { SYSTEM_PROMPT, buildContext, craftbitTools } from "./tools";
 const MAX_TURNS = 40;
 
 export interface AgentCallbacks {
-  onText(text: string): void;
+  /** Begin a streamed block; returns an id the panel updates as deltas arrive. */
+  onBlockStart(kind: "assistant" | "thinking"): string;
+  onBlockDelta(id: string, delta: string): void;
   onTool(tool: string, summary: string, ok: boolean): void;
   onError(message: string): void;
 }
@@ -40,21 +44,33 @@ export async function runAgent(
   for (let turn = 0; turn < MAX_TURNS; turn++) {
     let response: Anthropic.Message;
     try {
-      response = await client.messages.create({
+      // One streamed assistant/thinking entry per block, created lazily on the
+      // first delta so turns that only call tools add no empty bubbles.
+      let textId: string | null = null;
+      let thinkingId: string | null = null;
+      const stream = client.messages.stream({
         model: opts.model,
         max_tokens: 8000,
+        // Adaptive thinking (model-managed budget) so the panel can stream the
+        // model's reasoning. `as never` bridges a stale SDK type union that
+        // predates the adaptive variant; the wire value is what the API expects.
+        thinking: { type: "adaptive" } as never,
         system: SYSTEM_PROMPT,
         tools: craftbitTools,
         messages,
       });
+      stream.on("text", (delta) => {
+        if (!textId) textId = opts.onBlockStart("assistant");
+        opts.onBlockDelta(textId, delta);
+      });
+      stream.on("thinking", (delta) => {
+        if (!thinkingId) thinkingId = opts.onBlockStart("thinking");
+        opts.onBlockDelta(thinkingId, delta);
+      });
+      response = await stream.finalMessage();
     } catch (e) {
       opts.onError(errorMessage(e));
       return;
-    }
-
-    // Surface any assistant prose.
-    for (const block of response.content) {
-      if (block.type === "text" && block.text.trim()) opts.onText(block.text.trim());
     }
 
     messages.push({ role: "assistant", content: response.content });

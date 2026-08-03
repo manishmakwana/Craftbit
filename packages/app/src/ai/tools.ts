@@ -37,14 +37,33 @@ export const craftbitTools: Anthropic.Tool[] = [
   {
     name: "create_sketch",
     description:
-      "Create a 2D sketch on an origin plane with one or more closed profiles. Returns the sketchId to pass to extrude/revolve. Sketch coordinates are in millimeters on the plane. XY is the top plane (extrudes up +Z), XZ faces front, YZ faces side.",
+      "Create a 2D sketch with one or more closed profiles. Returns the sketchId to pass to extrude/revolve. Sketch coordinates are in millimeters. Sketch on an origin `plane` (XY is the top plane, extrudes up +Z; XZ faces front; YZ faces side) OR on an existing body's face via `onFace` (to build on top of geometry you already made). For a face sketch, (0,0) is the face centre, so profiles are placed relative to it.",
     input_schema: {
       type: "object",
       properties: {
         plane: {
           type: "string",
           enum: ["XY", "XZ", "YZ"],
-          description: "Origin plane to sketch on.",
+          description: "Origin plane to sketch on (omit if using onFace).",
+        },
+        onFace: {
+          type: "object",
+          description:
+            "Sketch on a body face instead of an origin plane. (0,0) is the face centre.",
+          properties: {
+            bodyId: { type: "string", description: "Body whose face to sketch on." },
+            dir: {
+              type: "string",
+              enum: ["top", "bottom", "left", "right", "front", "back"],
+              description: "Which face by outward normal (Z up).",
+            },
+            near: {
+              type: "array",
+              items: { type: "number" },
+              description: "Alternative to dir: [x,y,z] world point; picks the nearest face.",
+            },
+          },
+          required: ["bodyId"],
         },
         name: { type: "string", description: "Optional feature name." },
         profiles: {
@@ -76,7 +95,7 @@ export const craftbitTools: Anthropic.Tool[] = [
           },
         },
       },
-      required: ["plane", "profiles"],
+      required: ["profiles"],
     },
   },
   {
@@ -196,6 +215,78 @@ export const craftbitTools: Anthropic.Tool[] = [
     },
   },
   {
+    name: "fillet",
+    description:
+      "Round edges of a body with a constant radius. Select edges with a selector: which='all' (every edge), 'vertical' (Z-parallel), 'horizontal', 'top' or 'bottom' (the top/bottom rim), or near=[x,y,z] for the single nearest edge.",
+    input_schema: {
+      type: "object",
+      properties: {
+        bodyId: { type: "string" },
+        edges: {
+          type: "object",
+          properties: {
+            which: {
+              type: "string",
+              enum: ["all", "vertical", "horizontal", "top", "bottom"],
+            },
+            near: { type: "array", items: { type: "number" } },
+          },
+        },
+        radius: { type: "string", description: "Fillet radius (expression, mm)." },
+        name: { type: "string" },
+      },
+      required: ["bodyId", "radius"],
+    },
+  },
+  {
+    name: "chamfer",
+    description:
+      "Bevel edges of a body with a constant setback. Same edge selector as fillet (which='all'|'vertical'|'horizontal'|'top'|'bottom' or near=[x,y,z]).",
+    input_schema: {
+      type: "object",
+      properties: {
+        bodyId: { type: "string" },
+        edges: {
+          type: "object",
+          properties: {
+            which: {
+              type: "string",
+              enum: ["all", "vertical", "horizontal", "top", "bottom"],
+            },
+            near: { type: "array", items: { type: "number" } },
+          },
+        },
+        distance: { type: "string", description: "Chamfer setback (expression, mm)." },
+        name: { type: "string" },
+      },
+      required: ["bodyId", "distance"],
+    },
+  },
+  {
+    name: "shell",
+    description:
+      "Hollow a body to a wall thickness, removing one or more faces so it's open (e.g. a box open at the top). Select the open face(s) by dir ('top'/'bottom'/'left'/'right'/'front'/'back') or near=[x,y,z].",
+    input_schema: {
+      type: "object",
+      properties: {
+        bodyId: { type: "string" },
+        openFaces: {
+          type: "object",
+          properties: {
+            dir: {
+              type: "string",
+              enum: ["top", "bottom", "left", "right", "front", "back"],
+            },
+            near: { type: "array", items: { type: "number" } },
+          },
+        },
+        thickness: { type: "string", description: "Wall thickness (expression, mm)." },
+        name: { type: "string" },
+      },
+      required: ["bodyId", "thickness"],
+    },
+  },
+  {
     name: "delete_feature",
     description:
       "Delete a feature from the timeline by its id (also removes the body it created). Use to undo a wrong step.",
@@ -237,7 +328,8 @@ export const SYSTEM_PROMPT = `You are the Craftbit Copilot, a CAD assistant embe
 
 How Craftbit modeling works:
 - Always sketch FIRST, then turn the sketch into a solid with extrude or revolve. A sketch alone produces no geometry.
-- Sketches live on the three origin planes (XY/XZ/YZ). Sketching on an existing face is not available to you yet; neither are fillet, chamfer, shell, and joints — do not attempt them. If the user needs one, say so briefly.
+- Sketches live on the three origin planes (XY/XZ/YZ) OR on a face of an existing body (create_sketch onFace) — use a face sketch to build on top of geometry you already made (a boss, a hole, a cut); (0,0) is the face centre.
+- After a body exists you can round or bevel its edges (fillet, chamfer) and hollow it (shell) — select faces/edges with plain-language selectors (which='all'/'vertical'/'top'…, dir='top'…, or near=[x,y,z]); you don't need to know internal face ids. Joints are not available to you yet — if the user needs one, say so briefly.
 - Build assemblies as separate bodies positioned with move (translate + rotate about origin axes).
 - Dimensions are expressions and may reference parameters you create — prefer creating parameters (thickness, width, …) so the model stays parametric and easy to edit.
 - To make finger joints / tabs / slots, draw the alternating rectangles directly as multiple profiles in one sketch, or cut a patterned tool body.

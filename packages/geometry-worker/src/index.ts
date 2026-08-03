@@ -1,6 +1,9 @@
 export { createGeometryWorkerClient } from "./client";
 export type {
+  BodyAnalysis,
   BodyResult,
+  EdgeInfo,
+  FaceInfo,
   EvaluatedProfile,
   EvaluatedSketch,
   FeatureStatus,

@@ -40,9 +40,12 @@ against the real OCCT kernel):
 - **AI Copilot**: a chat panel that can *drive* Craftbit — describe a part
   ("a 120×80×40 mm finger-joint box in 5 mm plywood") and Claude builds it step
   by step by calling the same modeling operations you do (parameters, sketches,
-  extrude/revolve, boolean, move, mirror, patterns), watching the resulting
-  bodies and correcting course. Bring your own Anthropic API key — it's stored
-  only in your browser and calls the API directly (no backend).
+  extrude/revolve, boolean, move, mirror, patterns, fillet/chamfer/shell, and
+  sketches on the faces of bodies it already made), watching the resulting
+  bodies and correcting course. It refers to geometry in plain language ("all
+  vertical edges", "the top face") rather than internal ids, and its reasoning
+  and replies stream into the panel token-by-token. Bring your own Anthropic API
+  key — it's stored only in your browser and calls the API directly (no backend).
 - **Never lose work**: feature timeline with edit/delete and per-feature error
   reporting, unlimited undo/redo, IndexedDB autosave surviving reload, `.craftbit`
   file save/open.

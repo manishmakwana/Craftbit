@@ -173,6 +173,17 @@ button {
   color: var(--text-disabled);
   font-style: italic;
 }
+.ai-thinking-block {
+  font-size: 11px;
+  line-height: 1.4;
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: var(--text-disabled);
+  font-style: italic;
+  border-left: 2px solid var(--border-hairline);
+  padding: 2px 8px;
+  opacity: 0.85;
+}
 .ai-input {
   display: flex;
   gap: 4px;

@@ -11,11 +11,19 @@ import {
   type CraftbitDocument,
   type Feature,
   type Parameter,
+  type PlaneRef,
   type SketchProfile,
 } from "@craftbit/core";
-import type { RegenResult } from "@craftbit/geometry-worker";
+import type { BodyAnalysis, RegenResult } from "@craftbit/geometry-worker";
 import { useDocumentStore } from "../stores/documentStore";
 import { useGeometryStore } from "../stores/geometryStore";
+import {
+  resolveEdges,
+  resolveFace,
+  toFaceLocal,
+  type EdgeSelector,
+  type FaceSelector,
+} from "./refs";
 
 export interface ToolResult {
   text: string;
@@ -79,8 +87,29 @@ function toProfiles(raw: unknown): SketchProfile[] {
   });
 }
 
-/** Appends a feature, waits for regen, and reports its status + any new body. */
-async function commitFeature(feature: Feature, verb: string): Promise<ToolResult> {
+/** Shifts a face-relative sketch's profiles by (du,dv) mm so its (0,0) lands at
+ * the face centre. Expression coords are wrapped additively; polygon points are
+ * plain numbers and shifted directly. */
+function offsetProfiles(profiles: SketchProfile[], du: number, dv: number): SketchProfile[] {
+  const r = (n: number): number => Math.round(n * 1e6) / 1e6;
+  const addU = (e: string): string => `(${e})+(${r(du)})`;
+  const addV = (e: string): string => `(${e})+(${r(dv)})`;
+  return profiles.map((p): SketchProfile => {
+    if (p.kind === "rect") return { ...p, x: addU(p.x), y: addV(p.y) };
+    if (p.kind === "circle") return { ...p, cx: addU(p.cx), cy: addV(p.cy) };
+    return { ...p, points: p.points.map((pt) => ({ x: r(pt.x + du), y: r(pt.y + dv) })) };
+  });
+}
+
+/** Appends a feature, waits for regen, and reports its status + a body volume.
+ * `reportBodyId` names the body to report when a feature modifies an existing
+ * body in place (fillet/chamfer/shell keep the source id) rather than creating
+ * a new body keyed by the feature id. */
+async function commitFeature(
+  feature: Feature,
+  verb: string,
+  reportBodyId?: string,
+): Promise<ToolResult> {
   const gen = useGeometryStore.getState().result?.generation ?? -1;
   useDocumentStore.getState().dispatch({ kind: "addFeature", feature });
   const result = await waitForRegen(gen);
@@ -88,10 +117,19 @@ async function commitFeature(feature: Feature, verb: string): Promise<ToolResult
   if (status?.level === "error") {
     return { text: `${verb} failed: ${status.message}`, ok: false };
   }
-  const body = result?.bodies.find((b) => b.id === feature.id);
-  const bodyInfo = body ? `, body ${feature.id} volume ${(body.volume / 1000).toFixed(2)} cm³` : "";
+  const bodyId = reportBodyId ?? feature.id;
+  const body = result?.bodies.find((b) => b.id === bodyId);
+  const bodyInfo = body ? `, body ${bodyId} volume ${(body.volume / 1000).toFixed(2)} cm³` : "";
   const warn = status?.level === "warning" ? ` (warning: ${status.message})` : "";
   return { text: `${verb} ok — feature ${feature.id}${bodyInfo}${warn}`, ok: true };
+}
+
+/** Fetches worker face/edge analysis for one body of the live document. */
+async function analyzeBody(doc: CraftbitDocument, bodyId: string): Promise<BodyAnalysis> {
+  const { bodies } = await useGeometryStore.getState().analyze(doc);
+  const body = bodies.find((b) => b.id === bodyId);
+  if (!body) throw new Error(`no body "${bodyId}" — check the id from the document state`);
+  return body;
 }
 
 const num = (name: string): Parameter["name"] => name;
@@ -116,6 +154,28 @@ export async function executeTool(
       }
       case "create_sketch": {
         const id = newId();
+        let plane: PlaneRef;
+        let profiles = toProfiles(input.profiles);
+        let where: string;
+        const onFace = input.onFace as (FaceSelector & Record<string, unknown>) | undefined;
+        if (onFace && onFace.bodyId) {
+          const body = await analyzeBody(doc, String(onFace.bodyId));
+          const face = resolveFace(body, {
+            bodyId: String(onFace.bodyId),
+            dir: onFace.dir,
+            near: onFace.near,
+          });
+          plane = { kind: "face", bodyId: body.id, name: face.name };
+          // Sketch (0,0) maps to the plane origin (resolvePlane), which is an
+          // arbitrary point on the face; shift profiles so (0,0) is the face
+          // centre — the natural reference for face-relative placement.
+          const { u, v } = toFaceLocal(face, face.centroid);
+          profiles = offsetProfiles(profiles, u, v);
+          where = `${onFace.dir ?? "picked"} face of ${body.id}`;
+        } else {
+          plane = { kind: "origin", plane: (input.plane as "XY" | "XZ" | "YZ") ?? "XY" };
+          where = plane.plane;
+        }
         const feature: Feature = {
           id,
           type: "sketch",
@@ -124,14 +184,14 @@ export async function executeTool(
             `Sketch ${doc.features.filter((f) => f.type === "sketch").length + 1}`,
           ),
           suppressed: false,
-          plane: { kind: "origin", plane: (input.plane as "XY" | "XZ" | "YZ") ?? "XY" },
-          profiles: toProfiles(input.profiles),
+          plane,
+          profiles,
         };
         useDocumentStore.getState().dispatch({ kind: "addFeature", feature });
         const gen = useGeometryStore.getState().result?.generation ?? -1;
         await waitForRegen(gen);
         return {
-          text: `sketch ${id} created on ${feature.plane.kind === "origin" ? feature.plane.plane : "face"} with ${feature.profiles.length} profile(s)`,
+          text: `sketch ${id} created on ${where} with ${feature.profiles.length} profile(s)`,
           ok: true,
         };
       }
@@ -239,6 +299,55 @@ export async function executeTool(
             op: (input.op as "join" | "cut" | "intersect") ?? "join",
           },
           "combine",
+        );
+      }
+      case "fillet":
+      case "chamfer": {
+        const bodyId = String(input.bodyId ?? "");
+        const body = await analyzeBody(doc, bodyId);
+        const sel = (input.edges as Partial<EdgeSelector> | undefined) ?? {};
+        const edges = resolveEdges(body, {
+          bodyId,
+          which: sel.which,
+          near: sel.near,
+        });
+        const refs = edges.map((e) => ({ bodyId, name: e.name }));
+        const feature: Feature =
+          name === "fillet"
+            ? {
+                id: newId(),
+                type: "fillet",
+                name: str(input.name, "Fillet"),
+                suppressed: false,
+                edges: refs,
+                radius: str(input.radius, "2"),
+              }
+            : {
+                id: newId(),
+                type: "chamfer",
+                name: str(input.name, "Chamfer"),
+                suppressed: false,
+                edges: refs,
+                distance: str(input.distance, "2"),
+              };
+        return commitFeature(feature, `${name} (${edges.length} edges)`, bodyId);
+      }
+      case "shell": {
+        const bodyId = String(input.bodyId ?? "");
+        const body = await analyzeBody(doc, bodyId);
+        const sel = (input.openFaces as Partial<FaceSelector> | undefined) ?? {};
+        const face = resolveFace(body, { bodyId, dir: sel.dir, near: sel.near });
+        return commitFeature(
+          {
+            id: newId(),
+            type: "shell",
+            name: str(input.name, "Shell"),
+            suppressed: false,
+            faces: [{ bodyId, name: face.name }],
+            thickness: str(input.thickness, "2"),
+          },
+          "shell",
+          bodyId,
         );
       }
       case "delete_feature": {

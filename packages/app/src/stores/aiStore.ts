@@ -14,6 +14,7 @@ export type ChatRole = "user" | "assistant";
  * own entry type so the panel can show what the model did to the model. */
 export type ChatEntry =
   | { id: string; role: ChatRole; kind: "text"; text: string }
+  | { id: string; kind: "thinking"; text: string }
   | { id: string; kind: "tool"; tool: string; summary: string; ok: boolean }
   | { id: string; kind: "error"; text: string };
 
@@ -43,6 +44,8 @@ interface AiState {
   toggleOpen(): void;
   setRunning(running: boolean): void;
   addEntry(entry: ChatEntry): void;
+  /** Appends streamed text to a text/thinking entry (by id) in place. */
+  appendText(id: string, delta: string): void;
   clear(): void;
 }
 
@@ -82,6 +85,16 @@ export const useAiStore = create<AiState>((set) => ({
 
   addEntry(entry) {
     set((s) => ({ entries: [...s.entries, entry] }));
+  },
+
+  appendText(id, delta) {
+    set((s) => ({
+      entries: s.entries.map((e) =>
+        e.id === id && (e.kind === "text" || e.kind === "thinking")
+          ? { ...e, text: e.text + delta }
+          : e,
+      ),
+    }));
   },
 
   clear() {
