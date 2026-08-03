@@ -1,0 +1,69 @@
+name: Deploy to GitHub Pages
+
+# Builds the browser app and publishes it to GitHub Pages. Runs on every push
+# to develop (the integration branch) and can also be triggered manually from
+# the Actions tab. The app is fully client-side (OCCT runs in a Web Worker), so
+# static hosting is all it needs — no server, no cross-origin isolation.
+
+on:
+  push:
+    branches: [develop]
+  workflow_dispatch:
+
+# Least privilege for the Pages deployment.
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# One live deployment at a time; newer pushes supersede in-flight runs.
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    env:
+      # Project pages serve at https://<owner>.github.io/<repo>/ — Vite needs
+      # that subpath as its base so hashed assets and the WASM worker resolve.
+      VITE_BASE: /${{ github.event.repository.name }}/
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.33.0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build app
+        run: pnpm --filter @craftbit/app build
+
+      - name: Configure Pages
+        uses: actions/configure-pages@v5
+        with:
+          # Enable Pages (source = GitHub Actions) automatically on first run.
+          enablement: true
+
+      - name: Upload artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: packages/app/dist
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
