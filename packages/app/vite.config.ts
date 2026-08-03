@@ -2,6 +2,9 @@ import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
 
 export default defineConfig({
+  // Served from the domain root in dev/preview; the Pages deploy sets
+  // VITE_BASE=/<repo>/ so assets resolve under the project subpath.
+  base: process.env.VITE_BASE || "/",
   plugins: [react()],
   worker: {
     format: "es",
