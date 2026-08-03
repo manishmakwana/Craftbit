@@ -1,0 +1,248 @@
+/**
+ * The Copilot's tool surface: JSON-schema tool definitions the model calls to
+ * drive Craftbit, plus the context builder that serializes the current
+ * document + regeneration result into the system prompt. Tools map onto the
+ * same document commands the toolbar/dialogs use (ai/execute.ts performs them),
+ * so anything the model builds is an ordinary, undoable part of the timeline.
+ *
+ * Dimension fields are expression strings (like every dialog field), so the
+ * model can write parametric values that reference parameters it created
+ * ("thickness", "boxW/2", "3/8in").
+ */
+
+import type Anthropic from "@anthropic-ai/sdk";
+import type { CraftbitDocument } from "@craftbit/core";
+import type { RegenResult } from "@craftbit/geometry-worker";
+
+export const craftbitTools: Anthropic.Tool[] = [
+  {
+    name: "create_parameter",
+    description:
+      "Create a named parameter usable in any dimension expression (e.g. thickness=5). Reference it by name in later tool dimensions to keep the model parametric.",
+    input_schema: {
+      type: "object",
+      properties: {
+        name: {
+          type: "string",
+          description: "Identifier: letters, digits, underscore; starts with a letter.",
+        },
+        expression: {
+          type: "string",
+          description: 'Value expression, e.g. "5", "boxW/2", "3/8in".',
+        },
+      },
+      required: ["name", "expression"],
+    },
+  },
+  {
+    name: "create_sketch",
+    description:
+      "Create a 2D sketch on an origin plane with one or more closed profiles. Returns the sketchId to pass to extrude/revolve. Sketch coordinates are in millimeters on the plane. XY is the top plane (extrudes up +Z), XZ faces front, YZ faces side.",
+    input_schema: {
+      type: "object",
+      properties: {
+        plane: {
+          type: "string",
+          enum: ["XY", "XZ", "YZ"],
+          description: "Origin plane to sketch on.",
+        },
+        name: { type: "string", description: "Optional feature name." },
+        profiles: {
+          type: "array",
+          description:
+            "One or more closed profiles. Multiple rectangles are how you draw finger/tab patterns in a single panel.",
+          items: {
+            type: "object",
+            properties: {
+              kind: { type: "string", enum: ["rect", "circle", "polygon"] },
+              x: { type: "string", description: "rect: lower-left corner X (expression)." },
+              y: { type: "string", description: "rect: lower-left corner Y (expression)." },
+              width: { type: "string", description: "rect: width (expression)." },
+              height: { type: "string", description: "rect: height (expression)." },
+              cx: { type: "string", description: "circle: center X (expression)." },
+              cy: { type: "string", description: "circle: center Y (expression)." },
+              radius: { type: "string", description: "circle: radius (expression)." },
+              points: {
+                type: "array",
+                description: "polygon: ordered vertices (plain numbers, closed automatically).",
+                items: {
+                  type: "object",
+                  properties: { x: { type: "number" }, y: { type: "number" } },
+                  required: ["x", "y"],
+                },
+              },
+            },
+            required: ["kind"],
+          },
+        },
+      },
+      required: ["plane", "profiles"],
+    },
+  },
+  {
+    name: "extrude",
+    description:
+      "Extrude a sketch into a solid. operation new=new body, join=fuse into an existing body, cut=subtract from an existing body. Returns the resulting body id and volume.",
+    input_schema: {
+      type: "object",
+      properties: {
+        sketchId: { type: "string" },
+        distance: { type: "string", description: "Extrusion depth (expression, mm)." },
+        operation: { type: "string", enum: ["new", "join", "cut"] },
+        direction: {
+          type: "string",
+          enum: ["normal", "reversed", "symmetric"],
+          description: "normal=+plane-normal, reversed=-normal, symmetric=both ways.",
+        },
+        name: { type: "string" },
+      },
+      required: ["sketchId", "distance", "operation"],
+    },
+  },
+  {
+    name: "revolve",
+    description:
+      "Revolve a sketch profile around the sketch plane's X or Y axis. angle 360 = full revolution.",
+    input_schema: {
+      type: "object",
+      properties: {
+        sketchId: { type: "string" },
+        axis: { type: "string", enum: ["x", "y"] },
+        angle: { type: "string", description: "Degrees (expression); 360 for full." },
+        operation: { type: "string", enum: ["new", "join", "cut"] },
+        name: { type: "string" },
+      },
+      required: ["sketchId", "axis", "angle", "operation"],
+    },
+  },
+  {
+    name: "move",
+    description:
+      "Position a body: translate by (tx,ty,tz) mm and optionally rotate about an origin axis. Use this to lay out panels/parts in an assembly.",
+    input_schema: {
+      type: "object",
+      properties: {
+        bodyId: { type: "string" },
+        tx: { type: "string" },
+        ty: { type: "string" },
+        tz: { type: "string" },
+        rotAxis: { type: "string", enum: ["x", "y", "z"] },
+        rotAngle: { type: "string", description: "Degrees (expression)." },
+        name: { type: "string" },
+      },
+      required: ["bodyId"],
+    },
+  },
+  {
+    name: "mirror",
+    description:
+      "Mirror a body across an origin plane. merge=true fuses the copy into the source, false makes a new body.",
+    input_schema: {
+      type: "object",
+      properties: {
+        bodyId: { type: "string" },
+        plane: { type: "string", enum: ["XY", "XZ", "YZ"] },
+        merge: { type: "boolean" },
+        name: { type: "string" },
+      },
+      required: ["bodyId", "plane"],
+    },
+  },
+  {
+    name: "linear_pattern",
+    description: "Repeat a body along an axis: count copies spaced `spacing` mm apart.",
+    input_schema: {
+      type: "object",
+      properties: {
+        bodyId: { type: "string" },
+        direction: { type: "string", enum: ["x", "y", "z"] },
+        spacing: { type: "string", description: "Spacing between copies (expression, mm)." },
+        count: {
+          type: "string",
+          description: "Total number of copies including the original (expression).",
+        },
+        name: { type: "string" },
+      },
+      required: ["bodyId", "direction", "spacing", "count"],
+    },
+  },
+  {
+    name: "circular_pattern",
+    description: "Repeat a body around an origin axis: count copies evenly over 360°.",
+    input_schema: {
+      type: "object",
+      properties: {
+        bodyId: { type: "string" },
+        axis: { type: "string", enum: ["x", "y", "z"] },
+        count: { type: "string", description: "Total copies including the original (expression)." },
+        name: { type: "string" },
+      },
+      required: ["bodyId", "axis", "count"],
+    },
+  },
+  {
+    name: "boolean_combine",
+    description:
+      "Combine two bodies: join (union), cut (target minus tool), or intersect. The tool body is consumed.",
+    input_schema: {
+      type: "object",
+      properties: {
+        targetBodyId: { type: "string" },
+        toolBodyId: { type: "string" },
+        op: { type: "string", enum: ["join", "cut", "intersect"] },
+        name: { type: "string" },
+      },
+      required: ["targetBodyId", "toolBodyId", "op"],
+    },
+  },
+  {
+    name: "delete_feature",
+    description:
+      "Delete a feature from the timeline by its id (also removes the body it created). Use to undo a wrong step.",
+    input_schema: {
+      type: "object",
+      properties: { featureId: { type: "string" } },
+      required: ["featureId"],
+    },
+  },
+];
+
+/** Serializes the live document + regen result for the model each turn. */
+export function buildContext(doc: CraftbitDocument, result: RegenResult | null): string {
+  const params = doc.parameters.map((p) => `${p.name} = ${p.expression}`);
+  const features = doc.features.map((f) => {
+    const status = result?.statuses[f.id];
+    const flag =
+      status?.level === "error"
+        ? ` [ERROR: ${status.message}]`
+        : status?.level === "warning"
+          ? " [warning]"
+          : "";
+    return `- ${f.id} (${f.type}) "${f.name}"${flag}`;
+  });
+  const bodies = (result?.bodies ?? []).map(
+    (b) => `- ${b.id}: volume ${(b.volume / 1000).toFixed(2)} cm³, ${b.faceCount} faces`,
+  );
+  return [
+    `Units: ${doc.units}. Document "${doc.name}".`,
+    params.length ? `Parameters:\n${params.join("\n")}` : "Parameters: none.",
+    features.length ? `Timeline features:\n${features.join("\n")}` : "Timeline: empty.",
+    bodies.length
+      ? `Solid bodies (reference these ids for boolean/move/mirror/pattern):\n${bodies.join("\n")}`
+      : "Bodies: none yet.",
+  ].join("\n\n");
+}
+
+export const SYSTEM_PROMPT = `You are the Craftbit Copilot, a CAD assistant embedded in a parametric, browser-based CAD app. You build 3D models by calling tools that append features to the feature timeline — the same operations a user performs by hand.
+
+How Craftbit modeling works:
+- Always sketch FIRST, then turn the sketch into a solid with extrude or revolve. A sketch alone produces no geometry.
+- Sketches live on the three origin planes (XY/XZ/YZ). Sketching on an existing face is not available to you yet; neither are fillet, chamfer, shell, and joints — do not attempt them. If the user needs one, say so briefly.
+- Build assemblies as separate bodies positioned with move (translate + rotate about origin axes).
+- Dimensions are expressions and may reference parameters you create — prefer creating parameters (thickness, width, …) so the model stays parametric and easy to edit.
+- To make finger joints / tabs / slots, draw the alternating rectangles directly as multiple profiles in one sketch, or cut a patterned tool body.
+
+Working style:
+- Plan briefly, then just build it step by step with tool calls; you can see the resulting bodies/volumes in the context after each call and correct course.
+- Keep chat replies short. When the model is built, give a one or two sentence summary of what you made and its key dimensions.
+- If a tool returns an error, read it, fix the inputs, and retry — don't repeat the same failing call.`;

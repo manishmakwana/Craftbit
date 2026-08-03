@@ -1,5 +1,6 @@
 import { useEffect } from "react";
 import { Viewport } from "./viewport/Viewport";
+import { AiPanel } from "./components/AiPanel";
 import { TopBar } from "./components/TopBar";
 import { Toolbar } from "./components/Toolbar";
 import { BrowserPanel } from "./components/BrowserPanel";
@@ -110,6 +111,7 @@ export function App() {
     <div className="app-shell">
       <TopBar />
       <Toolbar />
+      <AiPanel />
       <BrowserPanel />
       <div className="viewport-area">
         <Viewport />
