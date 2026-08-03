@@ -84,6 +84,14 @@ const CONVERGENCE_TOL = 1e-8;
 const MAX_ITERATIONS = 200;
 const FD_STEP = 1e-6;
 const DRAG_WEIGHT = 0.05;
+// Weak pull of every free parameter toward its starting value. On an
+// under-constrained sketch this makes the solver prefer the solution nearest
+// the current geometry (least change) — so editing one dimension nudges the
+// shape instead of flinging free points to a far valid configuration. It only
+// bites in the constraints' null space (the free DOF); a follow-up
+// hard-constraints-only polish removes any residual bias so hard constraints
+// still end at solver tolerance.
+const ANCHOR_WEIGHT = 0.02;
 
 interface ParamIndex {
   /** pointId -> index of x in params (y is +1). */
@@ -103,6 +111,7 @@ function buildSystem(
   entities: SketchEntity[],
   constraints: SolvedConstraint[],
   drag: DragTarget | null,
+  anchorWeight = 0,
 ): System {
   const byId = new Map(entities.map((e) => [e.id, e]));
   const point = (id: string): SketchPointEnt => {
@@ -314,6 +323,14 @@ function buildSystem(
     }
   }
 
+  // Least-change anchors: pull each free parameter toward its starting value.
+  if (anchorWeight > 0) {
+    for (let j = 0; j < index.count; j++) {
+      const v0 = initValues[j]!;
+      residuals.push((p) => anchorWeight * (p[j]! - v0));
+    }
+  }
+
   return { index, residuals, init: Float64Array.from(initValues) };
 }
 
@@ -467,8 +484,13 @@ export function solveSketch(
     if (drag) {
       const dragSys = buildSystem(entities, constraints, drag);
       p = lmMinimize(dragSys, p);
-    }
-    if (hardSys.residuals.length > 0) {
+      if (hardSys.residuals.length > 0) p = lmMinimize(hardSys, p);
+    } else if (hardSys.residuals.length > 0) {
+      // Solve with a weak least-change anchor so an under-constrained sketch
+      // lands nearest its current shape, then polish on the hard constraints
+      // only so they still end exactly on the manifold.
+      const anchored = buildSystem(entities, constraints, null, ANCHOR_WEIGHT);
+      p = lmMinimize(anchored, p);
       p = lmMinimize(hardSys, p);
     }
   }

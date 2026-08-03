@@ -207,6 +207,50 @@ describe("solveSketch", () => {
     expect(Math.hypot(d.x - c.x, d.y - c.y)).toBeCloseTo(50, 5);
   });
 
+  it("least change: editing one angle on an under-constrained quad stays near the drawn shape", () => {
+    // Parallelogram with only a fixed corner, top-edge width, and one angle —
+    // heavily under-constrained (like a freehand sketch). Without a
+    // least-change bias the solver flings the free corners to a far valid
+    // configuration (bounding box exploding to ~600 tall); the anchor keeps
+    // the solution near the drawn geometry.
+    const quad = (): SketchEntity[] => [
+      pt("A", 0, 0),
+      pt("B", 160, 0),
+      pt("C", 190, -90),
+      pt("D", 30, -90),
+      ln("AB", "A", "B"),
+      ln("BC", "B", "C"),
+      ln("CD", "C", "D"),
+      ln("DA", "D", "A"),
+    ];
+    const base: SolvedConstraint[] = [
+      { id: "f", kind: "fixed", point: "A" },
+      { id: "w", kind: "distance", a: "A", b: "B", value: 160 },
+    ];
+    const height = (r: { entities: SketchEntity[] }) => {
+      const ys = r.entities.flatMap((e) => (e.kind === "point" ? [e.y] : []));
+      return Math.max(...ys) - Math.min(...ys);
+    };
+    const s0 = solveSketch(quad(), [
+      ...base,
+      { id: "a", kind: "angle", a: "AB", b: "BC", value: -108 },
+    ]);
+    expect(s0.converged).toBe(true);
+    // Drawn height is 90; a runaway solve reaches many hundreds.
+    expect(height(s0)).toBeLessThan(200);
+
+    // Now change the angle — the shape must adjust, not explode.
+    const s1 = solveSketch(s0.entities, [
+      ...base,
+      { id: "a", kind: "angle", a: "AB", b: "BC", value: -150 },
+    ]);
+    expect(s1.converged).toBe(true);
+    expect(height(s1)).toBeLessThan(200);
+    // The anchored corners stay put; the constraint is still satisfied.
+    expect(solvedPoint(s1, "A")).toMatchObject({ x: 0, y: 0 });
+    expect(solvedPoint(s1, "B").x).toBeCloseTo(160, 0);
+  });
+
   it("reports non-convergence for contradictory constraints", () => {
     const entities = [pt("a", 0, 0), pt("b", 10, 0), ln("l1", "a", "b")];
     const constraints: SolvedConstraint[] = [
