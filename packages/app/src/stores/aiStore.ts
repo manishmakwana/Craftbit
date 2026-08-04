@@ -20,6 +20,7 @@ export type ChatEntry =
 
 const KEY_STORAGE = "craftbit.anthropicApiKey";
 const MODEL_STORAGE = "craftbit.aiModel";
+const OPEN_STORAGE = "craftbit.aiOpen";
 export const AI_MODELS = ["claude-opus-5", "claude-sonnet-5", "claude-haiku-4-5"] as const;
 export type AiModel = (typeof AI_MODELS)[number];
 
@@ -36,12 +37,14 @@ interface AiState {
   model: AiModel;
   entries: ChatEntry[];
   running: boolean;
-  /** Panel open/closed (persisted only in-session). */
+  /** Panel open/collapsed. Starts collapsed — the Copilot only shows when the
+   * user opens it — and the choice is remembered across reloads. */
   open: boolean;
 
   setApiKey(key: string): void;
   setModel(model: AiModel): void;
   toggleOpen(): void;
+  setOpen(open: boolean): void;
   setRunning(running: boolean): void;
   addEntry(entry: ChatEntry): void;
   /** Appends streamed text to a text/thinking entry (by id) in place. */
@@ -54,7 +57,7 @@ export const useAiStore = create<AiState>((set) => ({
   model: (readStored(MODEL_STORAGE) || "claude-opus-5") as AiModel,
   entries: [],
   running: false,
-  open: true,
+  open: readStored(OPEN_STORAGE) === "1",
 
   setApiKey(key) {
     try {
@@ -76,7 +79,24 @@ export const useAiStore = create<AiState>((set) => ({
   },
 
   toggleOpen() {
-    set((s) => ({ open: !s.open }));
+    set((s) => {
+      const open = !s.open;
+      try {
+        localStorage.setItem(OPEN_STORAGE, open ? "1" : "0");
+      } catch {
+        // storage may be unavailable (private mode)
+      }
+      return { open };
+    });
+  },
+
+  setOpen(open) {
+    try {
+      localStorage.setItem(OPEN_STORAGE, open ? "1" : "0");
+    } catch {
+      // ignore
+    }
+    set({ open });
   },
 
   setRunning(running) {

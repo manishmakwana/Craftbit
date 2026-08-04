@@ -25,11 +25,13 @@ import {
 import { useDocumentStore } from "./stores/documentStore";
 import { useGeometryStore } from "./stores/geometryStore";
 import { useUiStore } from "./stores/uiStore";
+import { useAiStore } from "./stores/aiStore";
 import { loadFromAutosave } from "./stores/persistence";
 
 export function App() {
   const dialog = useUiStore((s) => s.dialog);
   const toast = useUiStore((s) => s.toast);
+  const aiOpen = useAiStore((s) => s.open);
 
   // Boot: start kernel load immediately, restore autosaved project.
   useEffect(() => {
@@ -108,10 +110,10 @@ export function App() {
   }, []);
 
   return (
-    <div className="app-shell">
+    <div className={`app-shell${aiOpen ? "" : " ai-collapsed"}`}>
       <TopBar />
       <Toolbar />
-      <AiPanel />
+      {aiOpen && <AiPanel />}
       <BrowserPanel />
       <div className="viewport-area">
         <Viewport />
