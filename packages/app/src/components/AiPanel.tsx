@@ -14,7 +14,8 @@ import { newId } from "@craftbit/core";
 
 export function AiPanel() {
   const { apiKey, model, entries, running } = useAiStore();
-  const { setApiKey, setModel, addEntry, appendText, clear, setRunning } = useAiStore.getState();
+  const { setApiKey, setModel, addEntry, appendText, clear, setRunning, setOpen } =
+    useAiStore.getState();
   const [draft, setDraft] = useState("");
   const [showSettings, setShowSettings] = useState(!apiKey);
   const listRef = useRef<HTMLDivElement | null>(null);
@@ -84,6 +85,14 @@ export function AiPanel() {
           disabled={running}
         >
           🗑
+        </button>
+        <button
+          className="btn ai-icon"
+          title="Collapse Copilot"
+          data-testid="ai-collapse"
+          onClick={() => setOpen(false)}
+        >
+          ✕
         </button>
       </div>
 

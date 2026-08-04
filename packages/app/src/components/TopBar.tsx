@@ -1,5 +1,6 @@
 import { useDocumentStore } from "../stores/documentStore";
 import { useUiStore } from "../stores/uiStore";
+import { useAiStore } from "../stores/aiStore";
 import { downloadDocument, openDocumentFile } from "../stores/persistence";
 
 export function TopBar() {
@@ -9,6 +10,8 @@ export function TopBar() {
   const canRedo = useDocumentStore((s) => s.history.redoStack.length > 0);
   const { dispatch, undo, redo, replaceDocument, newDocument } = useDocumentStore.getState();
   const openDialog = useUiStore((s) => s.openDialog);
+  const aiOpen = useAiStore((s) => s.open);
+  const toggleAi = useAiStore((s) => s.toggleOpen);
 
   return (
     <div className="top-bar">
@@ -25,6 +28,15 @@ export function TopBar() {
       </button>
       <button className="btn" onClick={redo} disabled={!canRedo} title="Redo (Ctrl+Y)">
         ↪ Redo
+      </button>
+      <button
+        className={`btn${aiOpen ? " primary" : ""}`}
+        onClick={toggleAi}
+        title={aiOpen ? "Hide Copilot" : "Show Copilot"}
+        data-testid="ai-toggle"
+        aria-pressed={aiOpen}
+      >
+        ✦ Copilot
       </button>
       <span className="spacer" />
       <button

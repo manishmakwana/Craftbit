@@ -36,6 +36,16 @@ button {
   height: 100%;
 }
 
+/* Copilot collapsed: drop its column so the workspace reclaims the space. */
+.app-shell.ai-collapsed {
+  grid-template-columns: 240px 1fr;
+  grid-template-areas:
+    "topbar topbar"
+    "toolbar toolbar"
+    "browser viewport"
+    "timeline timeline";
+}
+
 .top-bar {
   grid-area: topbar;
   display: flex;
