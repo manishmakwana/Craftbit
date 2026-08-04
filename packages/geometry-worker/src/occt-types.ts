@@ -342,7 +342,7 @@ export interface OpenCascadeInstance {
   BRepAdaptor_Curve_2: new (edge: TopoDsEdge) => BRepAdaptorCurve;
   BRepAdaptor_Surface_2: new (face: TopoDsFace, restriction: boolean) => BRepAdaptorSurface;
   GeomAbs_SurfaceType: { GeomAbs_Plane: { value: number } };
-  GeomAbs_CurveType: { GeomAbs_Circle: { value: number } };
+  GeomAbs_CurveType: { GeomAbs_Circle: { value: number }; GeomAbs_Line: { value: number } };
   GCPnts_TangentialDeflection_2: new (
     curve: BRepAdaptorCurve,
     angularDeflection: number,

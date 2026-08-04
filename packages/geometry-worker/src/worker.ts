@@ -3,6 +3,8 @@ import * as Comlink from "comlink";
 import { deserializeDocument, type CraftbitDocument } from "@craftbit/core";
 import { loadOcct } from "./occLoader";
 import {
+  collectFaces,
+  collectUniqueEdges,
   regenerateDocument,
   upgradeDocumentRefs,
   type EvaluatedSketch,
@@ -37,6 +39,37 @@ export interface StlExportResult {
   validation: StlValidation;
 }
 
+/** Geometry description of one face, for AI/selector reference resolution. */
+export interface FaceInfo {
+  /** D2 topological name — a durable TopoRef when paired with the body id. */
+  name: string;
+  centroid: [number, number, number];
+  /** Outward normal (planar faces); [0,0,0] for non-planar. */
+  normal: [number, number, number];
+  area: number;
+  planar: boolean;
+  /** Plane frame (planar faces only) — matches resolvePlane, so profiles
+   * expressed relative to the face centroid can be placed correctly. */
+  origin?: [number, number, number];
+  xdir?: [number, number, number];
+  ydir?: [number, number, number];
+}
+
+export interface EdgeInfo {
+  name: string;
+  midpoint: [number, number, number];
+  /** Unit direction (straight edges); chord direction otherwise. */
+  dir: [number, number, number];
+  length: number;
+  straight: boolean;
+}
+
+export interface BodyAnalysis {
+  id: string;
+  faces: FaceInfo[];
+  edges: EdgeInfo[];
+}
+
 export interface GeometryWorkerApi {
   ready(): Promise<void>;
   /**
@@ -46,6 +79,9 @@ export interface GeometryWorkerApi {
   regenerate(docJson: string, generation: number): Promise<RegenResult>;
   /** One-time v1→v2 upgrade: legacy index refs rewritten to D2 names. */
   upgradeDocument(docJson: string): Promise<{ doc: CraftbitDocument; failures: string[] }>;
+  /** Per-body face/edge descriptors for reference resolution (AI selectors,
+   * "the top face", "all vertical edges", face-relative sketches). */
+  analyze(docJson: string): Promise<{ bodies: BodyAnalysis[] }>;
   exportStl(docJson: string, bodyIds: string[]): Promise<StlExportResult>;
   exportStep(docJson: string, bodyIds: string[]): Promise<Uint8Array>;
 }
@@ -105,6 +141,74 @@ const api: GeometryWorkerApi = {
     const oc = await loadOcct();
     const doc = deserializeDocument(docJson);
     return upgradeDocumentRefs(oc, doc);
+  },
+
+  async analyze(docJson) {
+    const { oc, state } = await regenShapes(docJson);
+    const cross = (
+      a: [number, number, number],
+      b: [number, number, number],
+    ): [number, number, number] => [
+      a[1] * b[2] - a[2] * b[1],
+      a[2] * b[0] - a[0] * b[2],
+      a[0] * b[1] - a[1] * b[0],
+    ];
+    const bodies: BodyAnalysis[] = state.bodies.map((body) => {
+      const faces: FaceInfo[] = collectFaces(oc, body.shape).map((face, i) => {
+        const props = new oc.GProp_GProps_1();
+        oc.BRepGProp.SurfaceProperties_1(face, props, false, false);
+        const c = props.CentreOfMass();
+        const centroid: [number, number, number] = [c.X(), c.Y(), c.Z()];
+        const surf = new oc.BRepAdaptor_Surface_2(face, true);
+        const info: FaceInfo = {
+          name: body.names.faceNames[i] ?? `face#${i}`,
+          centroid,
+          normal: [0, 0, 0],
+          area: props.Mass(),
+          planar: false,
+        };
+        if (surf.GetType().value === oc.GeomAbs_SurfaceType.GeomAbs_Plane.value) {
+          const pln = surf.Plane();
+          const loc = pln.Location();
+          let n = pln.Axis().Direction();
+          if (face.Orientation_1().value === oc.TopAbs_Orientation.TopAbs_REVERSED.value) {
+            n = n.Reversed();
+          }
+          const xd = pln.Position().XDirection();
+          const nv: [number, number, number] = [n.X(), n.Y(), n.Z()];
+          const xv: [number, number, number] = [xd.X(), xd.Y(), xd.Z()];
+          info.planar = true;
+          info.normal = nv;
+          info.origin = [loc.X(), loc.Y(), loc.Z()];
+          info.xdir = xv;
+          info.ydir = cross(nv, xv);
+        }
+        return info;
+      });
+
+      const edges: EdgeInfo[] = collectUniqueEdges(oc, body.shape).map((edge, i) => {
+        const props = new oc.GProp_GProps_1();
+        oc.BRepGProp.LinearProperties(edge, props, false, false);
+        const curve = new oc.BRepAdaptor_Curve_2(edge);
+        const u0 = curve.FirstParameter();
+        const u1 = curve.LastParameter();
+        const p0 = curve.Value(u0);
+        const p1 = curve.Value(u1);
+        const mid = curve.Value((u0 + u1) / 2);
+        const d: [number, number, number] = [p1.X() - p0.X(), p1.Y() - p0.Y(), p1.Z() - p0.Z()];
+        const len = Math.hypot(d[0], d[1], d[2]) || 1;
+        return {
+          name: body.names.edgeNames[i] ?? `edge#${i}`,
+          midpoint: [mid.X(), mid.Y(), mid.Z()],
+          dir: [d[0] / len, d[1] / len, d[2] / len],
+          length: props.Mass(),
+          straight: curve.GetType().value === oc.GeomAbs_CurveType.GeomAbs_Line.value,
+        };
+      });
+
+      return { id: body.id, faces, edges };
+    });
+    return { bodies };
   },
 
   async exportStl(docJson, bodyIds) {

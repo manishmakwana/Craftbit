@@ -27,12 +27,12 @@ button {
 .app-shell {
   display: grid;
   grid-template-rows: 40px 36px 1fr auto;
-  grid-template-columns: 240px 1fr;
+  grid-template-columns: 300px 240px 1fr;
   grid-template-areas:
-    "topbar topbar"
-    "toolbar toolbar"
-    "browser viewport"
-    "timeline timeline";
+    "topbar topbar topbar"
+    "toolbar toolbar toolbar"
+    "ai browser viewport"
+    "timeline timeline timeline";
   height: 100%;
 }
 
@@ -62,6 +62,144 @@ button {
   border-right: 1px solid var(--border-hairline);
   overflow-y: auto;
   padding: var(--space-2);
+}
+
+/* --------------------------------------------------------------- AI Copilot */
+.ai-panel {
+  grid-area: ai;
+  background: var(--bg-panel);
+  border-right: 1px solid var(--border-hairline);
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+.ai-head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  padding: var(--space-2);
+  border-bottom: 1px solid var(--border-hairline);
+}
+.ai-title {
+  font-weight: 600;
+  color: var(--accent-strong);
+}
+.ai-icon {
+  height: 24px;
+  padding: 0 6px;
+}
+.ai-settings {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: var(--space-2);
+  border-bottom: 1px solid var(--border-hairline);
+  background: var(--bg-app);
+}
+.ai-settings label {
+  font-size: var(--text-xs);
+  color: var(--text-secondary);
+}
+.ai-settings input,
+.ai-settings select {
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-control);
+  color: var(--text-primary);
+  padding: 4px 6px;
+  font-size: var(--text-xs);
+}
+.ai-note {
+  font-size: 10px;
+  color: var(--text-disabled);
+  margin: 2px 0 0;
+  line-height: 1.4;
+}
+.ai-messages {
+  flex: 1;
+  overflow-y: auto;
+  padding: var(--space-2);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.ai-empty {
+  color: var(--text-disabled);
+  font-size: var(--text-xs);
+  line-height: 1.5;
+}
+.ai-msg {
+  font-size: var(--text-xs);
+  line-height: 1.45;
+  white-space: pre-wrap;
+  word-break: break-word;
+  border-radius: var(--radius-control);
+  padding: 6px 8px;
+}
+.ai-msg.user {
+  background: var(--accent-muted);
+  color: var(--text-primary);
+  align-self: flex-end;
+  max-width: 92%;
+}
+.ai-msg.assistant {
+  background: var(--bg-raised);
+  color: var(--text-primary);
+}
+.ai-msg.error {
+  background: var(--danger-muted, rgba(220, 80, 80, 0.15));
+  color: var(--danger, #e06c6c);
+}
+.ai-tool {
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-secondary);
+  border-left: 2px solid var(--accent);
+  padding: 2px 6px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ai-tool.bad {
+  border-left-color: var(--danger, #e06c6c);
+  color: var(--danger, #e06c6c);
+}
+.ai-tool-name {
+  color: var(--accent-strong);
+  font-weight: 600;
+}
+.ai-thinking {
+  font-size: var(--text-xs);
+  color: var(--text-disabled);
+  font-style: italic;
+}
+.ai-thinking-block {
+  font-size: 11px;
+  line-height: 1.4;
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: var(--text-disabled);
+  font-style: italic;
+  border-left: 2px solid var(--border-hairline);
+  padding: 2px 8px;
+  opacity: 0.85;
+}
+.ai-input {
+  display: flex;
+  gap: 4px;
+  padding: var(--space-2);
+  border-top: 1px solid var(--border-hairline);
+}
+.ai-input textarea {
+  flex: 1;
+  resize: none;
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-control);
+  color: var(--text-primary);
+  padding: 6px;
+  font-size: var(--text-xs);
+  font-family: inherit;
 }
 
 .viewport-area {

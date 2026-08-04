@@ -2,7 +2,15 @@ import * as Comlink from "comlink";
 import type { GeometryWorkerApi } from "./worker";
 
 export type { TessellatedMesh } from "./tessellate";
-export type { BodyResult, GeometryWorkerApi, RegenResult, StlExportResult } from "./worker";
+export type {
+  BodyAnalysis,
+  BodyResult,
+  EdgeInfo,
+  FaceInfo,
+  GeometryWorkerApi,
+  RegenResult,
+  StlExportResult,
+} from "./worker";
 export type { EvaluatedSketch, EvaluatedProfile, FeatureStatus, ResolvedPlane } from "./regen";
 export type { StlValidation } from "./exporters";
 

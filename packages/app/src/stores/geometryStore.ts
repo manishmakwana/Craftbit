@@ -9,6 +9,7 @@ import { create } from "zustand";
 import { serializeDocument, type CraftbitDocument } from "@craftbit/core";
 import {
   createGeometryWorkerClient,
+  type BodyAnalysis,
   type GeometryWorkerClient,
   type RegenResult,
   type StlExportResult,
@@ -29,6 +30,9 @@ interface GeometryState {
   requestRegen(doc: CraftbitDocument): void;
   exportStl(doc: CraftbitDocument): Promise<StlExportResult>;
   exportStep(doc: CraftbitDocument): Promise<Uint8Array>;
+  /** Per-body face/edge descriptors for AI selector resolution (the top face,
+   * all vertical edges, face-relative sketches). Runs an on-demand regen. */
+  analyze(doc: CraftbitDocument): Promise<{ bodies: BodyAnalysis[] }>;
 }
 
 let generation = 0;
@@ -94,5 +98,9 @@ export const useGeometryStore = create<GeometryState>((set) => ({
 
   exportStep(doc) {
     return worker().api.exportStep(serializeDocument(doc), []);
+  },
+
+  analyze(doc) {
+    return worker().api.analyze(serializeDocument(doc));
   },
 }));
